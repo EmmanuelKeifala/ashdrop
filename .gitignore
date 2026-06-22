@@ -1,0 +1,17 @@
+# node / sveltekit
+node_modules/
+ashdrop/web/.svelte-kit/
+ashdrop/web/build/
+ashdrop/web/.vercel/
+ashdrop/web/.netlify/
+
+# go / sqlite
+ashdrop/api/ashdrop
+*.db
+*.db-shm
+*.db-wal
+
+# env / local
+.env
+.env.local
+.DS_Store
