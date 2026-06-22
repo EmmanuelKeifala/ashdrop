@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { inview } from '$lib/actions/inview';
 	import Mark from '$lib/components/Mark.svelte';
+	import GithubIcon from '$lib/components/GithubIcon.svelte';
 
 	const mitigated = [
 		{ threat: 'Database or server breach', how: 'Only ciphertext is stored. The key is never sent, so a full dump is noise.' },
@@ -26,7 +27,9 @@
 	<nav class="nav-links">
 		<a href="/#how">how it works</a>
 		<a href="/security" aria-current="page">security</a>
-		<a href="https://github.com" target="_blank" rel="noreferrer" class="gh">★ GitHub</a>
+		<a href="https://github.com/abdullah4tech/ashdrop" target="_blank" rel="noreferrer" class="gh">
+			<GithubIcon size="0.95rem" /> GitHub
+		</a>
 	</nav>
 </header>
 
@@ -39,7 +42,7 @@
 			vault: it holds ciphertext for a little while and counts views. It has no key and no way to
 			read a secret — by design, not by policy.
 		</p>
-		<a href="https://github.com" target="_blank" rel="noreferrer" class="btn-ghost">Read the code →</a>
+		<a href="https://github.com/abdullah4tech/ashdrop" target="_blank" rel="noreferrer" class="btn-ghost">Read the code →</a>
 	</section>
 
 	<section class="band" use:inview>
@@ -91,7 +94,7 @@
 		<h2>Don’t take our word for it</h2>
 		<p class="prose">The code is open. Audit it, file an issue, or run your own copy.</p>
 		<div class="cta-row">
-			<a href="https://github.com" target="_blank" rel="noreferrer" class="btn-burn">Read the code</a>
+			<a href="https://github.com/abdullah4tech/ashdrop" target="_blank" rel="noreferrer" class="btn-burn">Read the code</a>
 			<a href="/" class="btn-ghost">Drop a secret →</a>
 		</div>
 	</section>
@@ -138,6 +141,9 @@
 		color: var(--color-ink);
 	}
 	.nav-links .gh {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
 		color: var(--color-rust);
 	}
 

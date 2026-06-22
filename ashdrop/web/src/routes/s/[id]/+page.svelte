@@ -2,11 +2,12 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import Mark from '$lib/components/Mark.svelte';
+	import GithubIcon from '$lib/components/GithubIcon.svelte';
 	import { parseEnv, maskValue, type EnvPair } from '$lib/env';
 	import { decryptSecret } from '$lib/crypto';
 	import { fetchSecret, burnSecret } from '$lib/api';
 
-	type Phase = 'loading' | 'sealed' | 'revealing' | 'revealed' | 'gone' | 'nokey' | 'error';
+	type Phase = 'loading' | 'sealed' | 'burning' | 'revealing' | 'revealed' | 'gone' | 'nokey' | 'error';
 	let phase = $state<Phase>('loading');
 	let errMsg = $state('');
 
@@ -18,6 +19,19 @@
 	let pairs = $state<EnvPair[]>([]);
 	let revealed = $state(false); // unmask values
 	let copied = $state(false);
+
+	// burn-animation props (computed once)
+	const CIPHER = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+	const rnd = (n: number) =>
+		Array.from({ length: n }, () => CIPHER[(Math.random() * CIPHER.length) | 0]).join('');
+	const burnLines = Array.from({ length: 5 }, (_, i) => ({ text: rnd(20 + (i % 3) * 7), delay: i * 90 }));
+	const embers = Array.from({ length: 16 }, () => ({
+		left: Math.round(Math.random() * 100),
+		delay: Math.round(Math.random() * 500),
+		dur: Math.round(700 + Math.random() * 600),
+		size: Math.round(3 + Math.random() * 4)
+	}));
+	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 	onMount(async () => {
 		keyB64 = location.hash.slice(1);
@@ -41,12 +55,14 @@
 
 	async function reveal() {
 		if (!cipher) return;
-		phase = 'revealing';
+		const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		phase = reduce ? 'revealing' : 'burning';
 		try {
 			plaintext = await decryptSecret(cipher.ciphertext, cipher.iv, keyB64);
 			pairs = parseEnv(plaintext);
 			// burn after a successful decrypt — never before (wrong key / drop shouldn't destroy it)
 			await burnSecret(id);
+			if (!reduce) await sleep(1000); // let the ash settle
 			phase = 'revealed';
 		} catch {
 			phase = 'error';
@@ -75,6 +91,9 @@
 
 <header class="nav">
 	<a href="/" class="brand"><Mark specks={false} class="brand-mark" />ashdrop</a>
+	<a href="https://github.com/abdullah4tech/ashdrop" target="_blank" rel="noreferrer" class="gh">
+		<GithubIcon size="0.95rem" /> GitHub
+	</a>
 </header>
 
 <main>
@@ -86,6 +105,23 @@
 			<h1>A secret was shared with you</h1>
 			<p class="warn">Opening it destroys it. You get <strong>one</strong> look — copy what you need.</p>
 			<button class="btn-burn" onclick={reveal}>Reveal secret 🔥</button>
+		</div>
+	{:else if phase === 'burning'}
+		<div class="card center burn-stage">
+			<div class="burn-lines">
+				{#each burnLines as l, i (i)}
+					<div class="burn-line" style="--d:{l.delay}ms">{l.text}</div>
+				{/each}
+			</div>
+			<div class="embers" aria-hidden="true">
+				{#each embers as e, i (i)}
+					<span
+						class="ember"
+						style="left:{e.left}%; --delay:{e.delay}ms; --dur:{e.dur}ms; width:{e.size}px; height:{e.size}px"
+					></span>
+				{/each}
+			</div>
+			<p class="burn-label">decrypting &amp; burning…</p>
 		</div>
 	{:else if phase === 'revealing'}
 		<p class="muted">Decrypting locally…</p>
@@ -143,6 +179,9 @@
 
 <style>
 	.nav {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
 		max-width: 42rem;
 		margin: 0 auto;
 		padding: 1.5rem;
@@ -159,6 +198,17 @@
 	}
 	.brand :global(.brand-mark) {
 		color: var(--color-rust);
+	}
+	.gh {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
+		font-size: 0.85rem;
+		color: var(--color-rust);
+		text-decoration: none;
+	}
+	.gh:hover {
+		color: var(--color-rust-deep);
 	}
 	main {
 		max-width: 42rem;
@@ -219,6 +269,80 @@
 	}
 	.linkbtn {
 		margin-top: 1.4rem;
+	}
+
+	/* burn animation */
+	.burn-stage {
+		position: relative;
+		overflow: hidden;
+		min-height: 13rem;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+	}
+	.burn-lines {
+		display: flex;
+		flex-direction: column;
+		gap: 0.5rem;
+		align-items: center;
+	}
+	.burn-line {
+		font-family: var(--font-mono);
+		font-size: 0.84rem;
+		color: var(--color-rust);
+		max-width: 90%;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		animation: ash-line 0.85s ease forwards;
+		animation-delay: var(--d);
+	}
+	@keyframes ash-line {
+		0% {
+			opacity: 1;
+			transform: translateY(0);
+			filter: blur(0);
+		}
+		100% {
+			opacity: 0;
+			transform: translateY(-16px);
+			filter: blur(4px);
+		}
+	}
+	.embers {
+		position: absolute;
+		inset: 0;
+		pointer-events: none;
+	}
+	.ember {
+		position: absolute;
+		bottom: 2.5rem;
+		border-radius: 50%;
+		background: var(--color-rust);
+		box-shadow: 0 0 6px 1px color-mix(in oklab, var(--color-rust) 70%, transparent);
+		opacity: 0;
+		animation: ember-rise var(--dur) ease-out forwards;
+		animation-delay: var(--delay);
+	}
+	@keyframes ember-rise {
+		0% {
+			opacity: 0;
+			transform: translateY(0) scale(1);
+		}
+		25% {
+			opacity: 0.9;
+		}
+		100% {
+			opacity: 0;
+			transform: translateY(-90px) scale(0.3);
+		}
+	}
+	.burn-label {
+		margin: 1.2rem 0 0;
+		font-family: var(--font-mono);
+		font-size: 0.78rem;
+		color: var(--color-rust);
+		text-align: center;
 	}
 
 	.burned-banner {

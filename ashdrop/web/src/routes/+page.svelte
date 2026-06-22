@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Mark from '$lib/components/Mark.svelte';
+	import GithubIcon from '$lib/components/GithubIcon.svelte';
 	import { parseEnv, buildEnv } from '$lib/env';
 	import { encryptSecret } from '$lib/crypto';
 	import { createSecret, fetchStatus, type CreateResult } from '$lib/api';
@@ -116,7 +117,9 @@
 	<a href="/" class="brand"><Mark specks={false} class="brand-mark" />ashdrop</a>
 	<nav class="nav-links">
 		<a href="/security">security</a>
-		<a href="https://github.com" target="_blank" rel="noreferrer" class="gh">★ GitHub</a>
+		<a href="https://github.com/abdullah4tech/ashdrop" target="_blank" rel="noreferrer" class="gh">
+			<GithubIcon size="0.95rem" /> GitHub
+		</a>
 	</nav>
 </header>
 
@@ -251,6 +254,9 @@
 		color: var(--color-ink);
 	}
 	.nav-links .gh {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.4rem;
 		color: var(--color-rust);
 	}
 
