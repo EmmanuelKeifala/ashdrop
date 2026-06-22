@@ -1,0 +1,14 @@
+# compiled binary
+/ashdrop
+
+# sqlite data
+*.db
+*.db-shm
+*.db-wal
+
+# local env
+.env
+.env.*
+
+# stray go build output named after the dir
+/api

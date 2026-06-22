@@ -1,0 +1,11 @@
+# keep the build context small & clean
+Dockerfile
+.dockerignore
+.gitignore
+README.md
+*.db
+*.db-shm
+*.db-wal
+ashdrop
+.env
+.env.*
