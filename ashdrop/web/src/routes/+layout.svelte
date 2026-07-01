@@ -17,9 +17,7 @@
 	<div class="nav-inner">
 		<a href="/" class="brand"><span class="brand-ash">ash</span>drop</a>
 		<nav class="nav-links">
-			<a href="/" aria-current={is('/') ? 'page' : undefined}>home</a>
 			<a href="/security" aria-current={is('/security') ? 'page' : undefined}>security</a>
-			<a href="/me" aria-current={is('/me') ? 'page' : undefined}>receive</a>
 			<a
 				href="https://github.com/abdullah4tech/ashdrop"
 				target="_blank"
