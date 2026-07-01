@@ -83,7 +83,7 @@
 
 	/* ── Hero ── */
 	.hero {
-		min-height: calc(100svh - 3.25rem);
+		min-height: calc(100svh - 4.75rem);
 		display: flex;
 		flex-direction: column;
 		justify-content: center;

@@ -34,13 +34,12 @@
 
 <style>
 	.nav {
-		border-bottom: 1px solid var(--color-line);
 		padding: 0 1.5rem;
 	}
 	.nav-inner {
 		max-width: 72rem;
 		margin: 0 auto;
-		height: 3.25rem;
+		height: 4.75rem;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -48,16 +47,16 @@
 	.brand {
 		font-family: var(--font-mono);
 		font-weight: 700;
-		font-size: 0.95rem;
+		font-size: 1.4rem;
 		color: var(--color-ink);
 		text-decoration: none;
-		letter-spacing: -0.01em;
+		letter-spacing: -0.02em;
 	}
 	.nav-links {
 		display: flex;
 		align-items: center;
-		gap: 1.6rem;
-		font-size: 0.82rem;
+		gap: 1.9rem;
+		font-size: 0.92rem;
 	}
 	.nav-links a {
 		color: var(--color-muted);
