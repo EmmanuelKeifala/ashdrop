@@ -1,0 +1,12 @@
+.{
+    .name = .ashdrop,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.0-dev.1398+cb5635714",
+    .fingerprint = 0xc50801f2eac2c15d,
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}

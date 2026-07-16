@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "generated_by": "Node.js Web Crypto",
+  "recipient_private_jwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "d": "UZtCPXFfi11UmhpTs-AbIEzS-ahHhsyUVfPGME1HV4M",
+    "x": "UwM5XZkcVodU5uKW10zVjhczheXnu9BkXEeU55pnvqk",
+    "y": "IOBYm6ne2_y4SFHPCjx5F7apZez_KB3UfW6nwKOMD2w"
+  },
+  "recipient_public_sec1": "BFMDOV2ZHFaHVObiltdM1Y4XM4Xl57vQZFxHlOeaZ76pIOBYm6ne2_y4SFHPCjx5F7apZez_KB3UfW6nwKOMD2w",
+  "ephemeral_private_jwk": {
+    "kty": "EC",
+    "crv": "P-256",
+    "d": "lKG7sUuQamGigPJF-ek8fztOI6gvay2wqPTwxtL057k",
+    "x": "XZHx0BUzMi6fuqyaJU3xCAlrXqA5h4QT6k1k8FJPhp0",
+    "y": "uGn_3ZqlZcLWTmvZ1I-3QXST3HAd29HmdCtRESAXqM4"
+  },
+  "ephemeral_public_sec1": "BF2R8dAVMzIun7qsmiVN8QgJa16gOYeEE-pNZPBST4aduGn_3ZqlZcLWTmvZ1I-3QXST3HAd29HmdCtRESAXqM4",
+  "iv": "ABEiM0RVZneImaq7",
+  "ciphertext": "rYQfKJ7NGzgRSSMCVIAA76fmAriClbRWtr_mAdGgpA3-H2XWeCYMGVbdWzOAPCyLewCgPBRIadBEtMuNgcN6bJA",
+  "plaintext": "DATABASE_URL=postgres://ashdrop\nTOKEN=top-secret\n"
+}

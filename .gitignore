@@ -11,6 +11,11 @@ ashdrop/api/ashdrop
 *.db-shm
 *.db-wal
 
+# zig CLI
+ashdrop/cli/.zig-cache/
+ashdrop/cli/zig-out/
+docs/*
+
 # env / local
 .env
 .env.local
