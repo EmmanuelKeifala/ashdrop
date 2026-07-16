@@ -4,6 +4,7 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"log"
@@ -15,12 +16,14 @@ import (
 )
 
 const (
-	maxBody = 96 * 1024       // ciphertext is capped ~64KB; leave room for JSON
-	maxTTL  = 30 * 24 * 3600  // 30 days
-	minTTL  = 60              // 1 minute floor
+	maxBody = 96 * 1024      // ciphertext is capped ~64KB; leave room for JSON
+	maxTTL  = 30 * 24 * 3600 // 30 days
+	minTTL  = 60             // 1 minute floor
 )
 
-var store *Store
+type API struct {
+	store *Store
+}
 
 func main() {
 	dbPath := getenv("ASHDROP_DB", "ashdrop.db")
@@ -28,35 +31,41 @@ func main() {
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
-	store = st
 	defer st.Close()
 
 	go cleanupLoop(st)
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/secrets", handleCreate)
-	mux.HandleFunc("GET /api/secrets/{id}", handleGet)
-	mux.HandleFunc("POST /api/secrets/{id}/burn", handleBurn)
-	mux.HandleFunc("GET /api/secrets/{id}/status", handleStatus)
-	mux.HandleFunc("DELETE /api/secrets/{id}", handleDelete)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	})
-
 	addr := ":" + getenv("PORT", "8080")
 	log.Printf("ashdrop api listening on %s (db: %s)", addr, dbPath)
-	log.Fatal(http.ListenAndServe(addr, cors(rateLimit(mux))))
+	log.Fatal(http.ListenAndServe(addr, newHandler(st)))
 }
 
 // ---- handlers ----
 
-func handleCreate(w http.ResponseWriter, r *http.Request) {
+func newHandler(store *Store) http.Handler {
+	api := &API{store: store}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/secrets", api.handleCreate)
+	mux.HandleFunc("GET /api/secrets/{id}", api.handleGet)
+	mux.HandleFunc("GET /api/secrets/{id}/metadata", api.handleMetadata)
+	mux.HandleFunc("POST /api/secrets/{id}/open", api.handleOpen)
+	mux.HandleFunc("POST /api/secrets/{id}/burn", api.handleBurn)
+	mux.HandleFunc("GET /api/secrets/{id}/status", api.handleStatus)
+	mux.HandleFunc("DELETE /api/secrets/{id}", api.handleDelete)
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	})
+	return cors(rateLimit(mux))
+}
+
+func (api *API) handleCreate(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 	var req struct {
 		Ciphertext   string `json:"ciphertext"`
 		IV           string `json:"iv"`
 		TTL          int    `json:"ttl"`
 		MaxViews     int    `json:"maxViews"`
+		RecipientPub string `json:"recipientPub"`
 		EphemeralPub string `json:"ephemeralPub"` // non-empty = recipient-keyed ECDH drop
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -70,6 +79,12 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	if len(req.Ciphertext) > maxBody {
 		httpError(w, http.StatusRequestEntityTooLarge, "secret too large")
 		return
+	}
+	if req.RecipientPub != "" {
+		if !validPublicKey(req.RecipientPub) || !validPublicKey(req.EphemeralPub) {
+			httpError(w, http.StatusBadRequest, "invalid recipient public key")
+			return
+		}
 	}
 
 	ttl := req.TTL
@@ -91,9 +106,10 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 		MaxViews:     maxViews,
 		ExpiresAt:    time.Now().Unix() + int64(ttl),
 		NotifyTok:    notify,
+		RecipientPub: req.RecipientPub,
 		EphemeralPub: req.EphemeralPub,
 	}
-	if err := store.Put(id, sec); err != nil {
+	if err := api.store.Put(id, sec); err != nil {
 		httpError(w, http.StatusInternalServerError, "could not store secret")
 		return
 	}
@@ -104,8 +120,8 @@ func handleCreate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleGet(w http.ResponseWriter, r *http.Request) {
-	sec, err := store.Fetch(r.PathValue("id"))
+func (api *API) handleGet(w http.ResponseWriter, r *http.Request) {
+	sec, err := api.store.Fetch(r.PathValue("id"))
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "lookup failed")
 		return
@@ -114,31 +130,63 @@ func handleGet(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, "this secret no longer exists")
 		return
 	}
-	viewsLeft := -1 // unlimited
-	if sec.MaxViews > 0 {
-		viewsLeft = sec.MaxViews - sec.Views
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ciphertext":     sec.Ciphertext,
 		"iv":             sec.IV,
-		"viewsLeft":      viewsLeft,
+		"viewsLeft":      viewsLeft(sec),
 		"ephemeralPub":   sec.EphemeralPub,
 		"recipientKeyed": sec.EphemeralPub != "",
 	})
 }
 
-func handleBurn(w http.ResponseWriter, r *http.Request) {
-	if err := store.Burn(r.PathValue("id")); err != nil {
+func (api *API) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	sec, err := api.store.Metadata(r.PathValue("id"))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	if sec == nil {
+		httpError(w, http.StatusNotFound, "this secret no longer exists")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recipientKeyed": sec.EphemeralPub != "",
+		"recipientPub":   sec.RecipientPub,
+		"expiresAt":      sec.ExpiresAt,
+		"viewsLeft":      viewsLeft(sec),
+	})
+}
+
+func (api *API) handleOpen(w http.ResponseWriter, r *http.Request) {
+	sec, err := api.store.Open(r.PathValue("id"))
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	if sec == nil {
+		httpError(w, http.StatusNotFound, "this secret no longer exists")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ciphertext":     sec.Ciphertext,
+		"iv":             sec.IV,
+		"ephemeralPub":   sec.EphemeralPub,
+		"recipientKeyed": sec.EphemeralPub != "",
+	})
+}
+
+func (api *API) handleBurn(w http.ResponseWriter, r *http.Request) {
+	if err := api.store.Burn(r.PathValue("id")); err != nil {
 		httpError(w, http.StatusInternalServerError, "burn failed")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func handleStatus(w http.ResponseWriter, r *http.Request) {
+func (api *API) handleStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	tok := r.URL.Query().Get("notifyToken")
-	notifyTok, opened, openedAt, found, err := store.Status(id)
+	notifyTok, opened, openedAt, found, err := api.store.Status(id)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, "status failed")
 		return
@@ -157,8 +205,8 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func handleDelete(w http.ResponseWriter, r *http.Request) {
-	if err := store.Delete(r.PathValue("id")); err != nil {
+func (api *API) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if err := api.store.Delete(r.PathValue("id")); err != nil {
 		httpError(w, http.StatusInternalServerError, "delete failed")
 		return
 	}
@@ -180,7 +228,7 @@ func cors(next http.Handler) http.Handler {
 	})
 }
 
-// rateLimit is a small fixed-window per-IP limiter on writes (POST). Reads pass.
+// rateLimit is a small fixed-window per-IP limiter on creates. Other requests pass.
 func rateLimit(next http.Handler) http.Handler {
 	type win struct {
 		start time.Time
@@ -192,7 +240,7 @@ func rateLimit(next http.Handler) http.Handler {
 		limit   = 30 // creates per minute per IP
 	)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || !strings.HasPrefix(r.URL.Path, "/api/secrets") || strings.HasSuffix(r.URL.Path, "/burn") {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/secrets" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -216,6 +264,18 @@ func rateLimit(next http.Handler) http.Handler {
 }
 
 // ---- helpers ----
+
+func viewsLeft(sec *Secret) int {
+	if sec.MaxViews > 0 {
+		return sec.MaxViews - sec.Views
+	}
+	return -1 // unlimited
+}
+
+func validPublicKey(encoded string) bool {
+	pub, err := base64.RawURLEncoding.DecodeString(encoded)
+	return err == nil && len(pub) == 65 && pub[0] == 0x04 && base64.RawURLEncoding.EncodeToString(pub) == encoded
+}
 
 func cleanupLoop(s *Store) {
 	t := time.NewTicker(5 * time.Minute)

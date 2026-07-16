@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -19,6 +20,7 @@ type Secret struct {
 	ExpiresAt    int64
 	NotifyTok    string
 	OpenedAt     *int64
+	RecipientPub string // non-empty = recipient-keyed drop (ECDH); recipient's public key
 	EphemeralPub string // non-empty = recipient-keyed drop (ECDH); sender's ephemeral public key
 }
 
@@ -37,6 +39,7 @@ CREATE TABLE IF NOT EXISTS secrets (
 	expires_at    INTEGER NOT NULL,
 	notify_token  TEXT NOT NULL,
 	opened_at     INTEGER,
+	recipient_pub TEXT NOT NULL DEFAULT '',
 	ephemeral_pub TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_secrets_expires ON secrets(expires_at);
@@ -55,6 +58,11 @@ func OpenStore(path string) (*Store, error) {
 	// Migrate existing databases: safe to ignore errors when columns already exist.
 	_, _ = db.Exec(`ALTER TABLE secrets ADD COLUMN pin_protected INTEGER NOT NULL DEFAULT 0`)
 	_, _ = db.Exec(`ALTER TABLE secrets ADD COLUMN ephemeral_pub TEXT NOT NULL DEFAULT ''`)
+	_, err = db.Exec(`ALTER TABLE secrets ADD COLUMN recipient_pub TEXT NOT NULL DEFAULT ''`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name: recipient_pub") {
+		_ = db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -64,23 +72,23 @@ func now() int64 { return time.Now().Unix() }
 
 func (s *Store) Put(id string, sec Secret) error {
 	_, err := s.db.Exec(
-		`INSERT INTO secrets (id, ciphertext, iv, max_views, views, burned, expires_at, notify_token, ephemeral_pub)
-		 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?)`,
-		id, sec.Ciphertext, sec.IV, sec.MaxViews, sec.ExpiresAt, sec.NotifyTok, sec.EphemeralPub,
+		`INSERT INTO secrets (id, ciphertext, iv, max_views, views, burned, expires_at, notify_token, recipient_pub, ephemeral_pub)
+		 VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?)`,
+		id, sec.Ciphertext, sec.IV, sec.MaxViews, sec.ExpiresAt, sec.NotifyTok, sec.RecipientPub, sec.EphemeralPub,
 	)
 	return err
 }
 
-// Fetch returns the secret only if it's still retrievable (exists, unexpired,
-// not yet burned). Expired rows are reaped lazily. Returns (nil, nil) for "gone".
-func (s *Store) Fetch(id string) (*Secret, error) {
+// Metadata returns public drop state without reading the encrypted payload.
+// Expired rows are reaped lazily. Returns (nil, nil) for a missing or burned drop.
+func (s *Store) Metadata(id string) (*Secret, error) {
 	var sec Secret
 	var openedAt sql.NullInt64
 	var burned int
 	row := s.db.QueryRow(
-		`SELECT ciphertext, iv, max_views, views, burned, expires_at, notify_token, opened_at, ephemeral_pub
+		`SELECT max_views, views, burned, expires_at, opened_at, recipient_pub, ephemeral_pub
 		 FROM secrets WHERE id = ?`, id)
-	err := row.Scan(&sec.Ciphertext, &sec.IV, &sec.MaxViews, &sec.Views, &burned, &sec.ExpiresAt, &sec.NotifyTok, &openedAt, &sec.EphemeralPub)
+	err := row.Scan(&sec.MaxViews, &sec.Views, &burned, &sec.ExpiresAt, &openedAt, &sec.RecipientPub, &sec.EphemeralPub)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -92,6 +100,104 @@ func (s *Store) Fetch(id string) (*Secret, error) {
 		return nil, nil
 	}
 	if burned == 1 {
+		return nil, nil
+	}
+	if openedAt.Valid {
+		v := openedAt.Int64
+		sec.OpenedAt = &v
+	}
+	return &sec, nil
+}
+
+// Open atomically retrieves and records a view. A final permitted view returns
+// its captured payload while burning and wiping the stored payload before commit.
+func (s *Store) Open(id string) (*Secret, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	var sec Secret
+	var burned int
+	var openedAt sql.NullInt64
+	row := tx.QueryRow(
+		`SELECT ciphertext, iv, max_views, views, burned, expires_at, opened_at, ephemeral_pub
+		 FROM secrets WHERE id = ?`, id)
+	err = row.Scan(&sec.Ciphertext, &sec.IV, &sec.MaxViews, &sec.Views, &burned, &sec.ExpiresAt, &openedAt, &sec.EphemeralPub)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	current := now()
+	if sec.ExpiresAt <= current {
+		if _, err := tx.Exec(`DELETE FROM secrets WHERE id = ?`, id); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+	if burned == 1 || (sec.MaxViews > 0 && sec.Views >= sec.MaxViews) {
+		return nil, nil
+	}
+
+	sec.Views++
+	if openedAt.Valid {
+		v := openedAt.Int64
+		sec.OpenedAt = &v
+	} else {
+		sec.OpenedAt = &current
+	}
+
+	if sec.MaxViews > 0 && sec.Views >= sec.MaxViews {
+		_, err = tx.Exec(
+			`UPDATE secrets SET views = ?, burned = 1, ciphertext = '', iv = '', opened_at = ? WHERE id = ?`,
+			sec.Views, *sec.OpenedAt, id,
+		)
+	} else {
+		_, err = tx.Exec(
+			`UPDATE secrets SET views = ?, opened_at = ? WHERE id = ?`,
+			sec.Views, *sec.OpenedAt, id,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &sec, nil
+}
+
+// Fetch returns the secret only if it's still retrievable (exists, unexpired,
+// not yet burned). Expired rows are reaped lazily. Returns (nil, nil) for "gone".
+func (s *Store) Fetch(id string) (*Secret, error) {
+	var sec Secret
+	var openedAt sql.NullInt64
+	var burned int
+	row := s.db.QueryRow(
+		`SELECT ciphertext, iv, max_views, views, burned, expires_at, notify_token, opened_at, recipient_pub, ephemeral_pub
+		 FROM secrets WHERE id = ?`, id)
+	err := row.Scan(&sec.Ciphertext, &sec.IV, &sec.MaxViews, &sec.Views, &burned, &sec.ExpiresAt, &sec.NotifyTok, &openedAt, &sec.RecipientPub, &sec.EphemeralPub)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if sec.ExpiresAt <= now() {
+		_, _ = s.db.Exec(`DELETE FROM secrets WHERE id = ?`, id)
+		return nil, nil
+	}
+	if burned == 1 {
+		return nil, nil
+	}
+	if sec.RecipientPub != "" {
 		return nil, nil
 	}
 	if openedAt.Valid {
