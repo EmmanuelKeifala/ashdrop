@@ -1,6 +1,6 @@
+// Generates the deterministic Web Crypto protocol vector consumed by the Zig CLI tests.
 // Generate with: node ashdrop/cli/testdata/generate-protocol-v1.mjs > ashdrop/cli/testdata/protocol-v1.json
 // This uses Node.js Web Crypto via node:crypto webcrypto.subtle.
-// Generates the deterministic Web Crypto protocol vector consumed by the Zig CLI tests.
 import { webcrypto } from "node:crypto";
 
 const { subtle } = webcrypto;
