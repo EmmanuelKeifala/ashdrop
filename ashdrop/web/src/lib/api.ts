@@ -2,13 +2,16 @@
 
 const BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8080';
 
-export interface CreateInput {
+interface CreateInputBase {
 	ciphertext: string;
 	iv: string;
 	ttl: number; // seconds
 	maxViews: number; // 0 = unlimited
-	ephemeralPub?: string; // non-empty = recipient-keyed ECDH drop
 }
+
+export type CreateInput =
+	| (CreateInputBase & { ephemeralPub: string; recipientPub: string })
+	| (CreateInputBase & { ephemeralPub?: never; recipientPub?: never });
 
 export interface CreateResult {
 	id: string;
@@ -22,6 +25,20 @@ export interface FetchedSecret {
 	viewsLeft: number; // -1 = unlimited
 	ephemeralPub: string;
 	recipientKeyed: boolean;
+}
+
+export interface OpenedSecret {
+	ciphertext: string;
+	iv: string;
+	ephemeralPub: string;
+	recipientKeyed: boolean;
+}
+
+export interface DropMetadata {
+	recipientKeyed: boolean;
+	recipientPub: string;
+	expiresAt: number;
+	viewsLeft: number;
 }
 
 export async function createSecret(input: CreateInput): Promise<CreateResult> {
@@ -40,6 +57,20 @@ export async function fetchSecret(id: string): Promise<FetchedSecret | null> {
 	const r = await fetch(`${BASE}/api/secrets/${id}`);
 	if (r.status === 404) return null;
 	if (!r.ok) throw new Error('Could not load the drop.');
+	return r.json();
+}
+
+export async function fetchMetadata(id: string): Promise<DropMetadata | null> {
+	const r = await fetch(`${BASE}/api/secrets/${id}/metadata`);
+	if (r.status === 404) return null;
+	if (!r.ok) throw new Error('Could not load the drop.');
+	return r.json();
+}
+
+export async function openSecret(id: string): Promise<OpenedSecret | null> {
+	const r = await fetch(`${BASE}/api/secrets/${id}/open`, { method: 'POST' });
+	if (r.status === 404) return null;
+	if (!r.ok) throw new Error('Could not open the drop.');
 	return r.json();
 }
 

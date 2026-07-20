@@ -60,7 +60,8 @@
 				iv: sealed.iv,
 				ttl,
 				maxViews,
-				ephemeralPub: sealed.ephemeralPub
+				ephemeralPub: sealed.ephemeralPub,
+				recipientPub: recipientPubB64
 			});
 			result = res;
 			dropLink = `${location.origin}/s/${res.id}`;

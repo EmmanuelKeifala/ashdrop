@@ -12,17 +12,22 @@ services:
     healthCheckPath: /healthz
     autoDeploy: true
     # Render injects PORT at runtime and the app binds to it — don't set PORT here.
+    envVars:
+      # Render's load balancer is the trusted proxy.
+      - key: ASHDROP_TRUST_PROXY
+        value: "true"
 
     # --- Persistence (optional; needs a paid instance, not free) ---
     # SQLite lives on an ephemeral filesystem by default, so drops reset on every
     # deploy/restart. That's tolerable for an MVP (secrets are short-lived and
     # re-creatable). To keep drops across restarts, switch `plan` off free, then
-    # uncomment the disk + env below — the image already declares VOLUME /data.
+    # uncomment the disk and add ASHDROP_DB to the envVars list above — the image
+    # already declares VOLUME /data.
     #
     # disk:
     #   name: ashdrop-data
     #   mountPath: /data
     #   sizeGB: 1
-    # envVars:
-    #   - key: ASHDROP_DB
-    #     value: /data/ashdrop.db
+    # Add this entry to the envVars list above:
+    # - key: ASHDROP_DB
+    #   value: /data/ashdrop.db

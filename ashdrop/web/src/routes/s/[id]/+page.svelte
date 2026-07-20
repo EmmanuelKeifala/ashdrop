@@ -2,8 +2,8 @@
 	import { onMount } from 'svelte';
 	import { page } from '$app/state';
 	import { parseEnv, maskValue, type EnvPair } from '$lib/env';
-	import { decryptSecret, decryptWithMyKey, hasMyKeyPair } from '$lib/crypto';
-	import { fetchSecret, burnSecret } from '$lib/api';
+	import { decryptSecret, decryptWithMyKey, hasMyKeyPair, myPublicKeyB64 } from '$lib/crypto';
+	import { fetchMetadata, fetchSecret, openSecret, burnSecret } from '$lib/api';
 
 	type Phase = 'loading' | 'sealed' | 'recipient-sealed' | 'no-local-key' | 'burning' | 'revealing' | 'revealed' | 'gone' | 'nokey' | 'error';
 	let phase = $state<Phase>('loading');
@@ -12,6 +12,9 @@
 	const id = page.params.id ?? '';
 	let keyB64 = '';
 	let cipher: { ciphertext: string; iv: string; ephemeralPub: string; recipientKeyed: boolean } | null = null;
+	let opensOnReveal = false;
+	let expectedRecipientPub = '';
+	let recipientKeyMismatch = $state(false);
 
 	let plaintext = $state('');
 	let pairs = $state<EnvPair[]>([]);
@@ -32,6 +35,22 @@
 
 	onMount(async () => {
 		try {
+			const metadata = await fetchMetadata(id);
+			if (!metadata) { phase = 'gone'; return; }
+			if (metadata.recipientKeyed && metadata.recipientPub) {
+				const hasKeyPair = hasMyKeyPair();
+				const matchesRecipient = myPublicKeyB64() === metadata.recipientPub;
+				if (!matchesRecipient || !hasKeyPair) {
+					recipientKeyMismatch = hasKeyPair && !matchesRecipient;
+					phase = 'no-local-key';
+					return;
+				}
+				expectedRecipientPub = metadata.recipientPub;
+				opensOnReveal = true;
+				phase = 'recipient-sealed';
+				return;
+			}
+
 			const s = await fetchSecret(id);
 			if (!s) { phase = 'gone'; return; }
 			cipher = { ciphertext: s.ciphertext, iv: s.iv, ephemeralPub: s.ephemeralPub, recipientKeyed: s.recipientKeyed };
@@ -48,22 +67,37 @@
 	});
 
 	async function reveal() {
-		if (!cipher) return;
 		const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 		phase = reduce ? 'revealing' : 'burning';
+		let secret = cipher;
 		try {
-			if (cipher.recipientKeyed) {
-				plaintext = await decryptWithMyKey(cipher.ciphertext, cipher.iv, cipher.ephemeralPub);
+			if (opensOnReveal) {
+				const hasKeyPair = hasMyKeyPair();
+				const currentRecipientPub = myPublicKeyB64();
+				if (!hasKeyPair || currentRecipientPub !== expectedRecipientPub) {
+					recipientKeyMismatch = hasKeyPair && currentRecipientPub !== expectedRecipientPub;
+					phase = 'no-local-key';
+					return;
+				}
+				const opened = await openSecret(id);
+				if (!opened) { phase = 'gone'; return; }
+				secret = opened;
+				cipher = opened;
+			}
+			if (!secret) return;
+
+			if (secret.recipientKeyed) {
+				plaintext = await decryptWithMyKey(secret.ciphertext, secret.iv, secret.ephemeralPub);
 			} else {
-				plaintext = await decryptSecret(cipher.ciphertext, cipher.iv, keyB64);
+				plaintext = await decryptSecret(secret.ciphertext, secret.iv, keyB64);
 			}
 			pairs = parseEnv(plaintext);
-			await burnSecret(id);
+			if (!opensOnReveal) await burnSecret(id);
 			if (!reduce) await sleep(1000);
 			phase = 'revealed';
 		} catch {
 			phase = 'error';
-			errMsg = cipher.recipientKeyed
+			errMsg = secret?.recipientKeyed || opensOnReveal
 				? 'Could not decrypt. Make sure you are on the same browser where you set up your receive address.'
 				: 'This link is invalid or was tampered with.';
 		}
@@ -103,7 +137,11 @@
 	{:else if phase === 'no-local-key'}
 		<div class="card">
 			<h1>Wrong browser or device.</h1>
-			<p class="muted">This drop was encrypted for a specific receive address. Open it on the browser where you set up your key.</p>
+			{#if recipientKeyMismatch}
+				<p class="muted">This drop targets a different local receive address. Open it on the browser where that address was set up.</p>
+			{:else}
+				<p class="muted">This drop was encrypted for a specific receive address. Open it on the browser where you set up your key.</p>
+			{/if}
 			<a href="/me" class="cta" style="display:inline-block;text-decoration:none;margin-top:1.4rem">Check your receive address →</a>
 		</div>
 
