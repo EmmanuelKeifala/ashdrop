@@ -31,7 +31,8 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          version=$(ashdrop/cli/scripts/release-version.sh "$GITHUB_REF_NAME")
+          version=$(ashdrop/cli/scripts/release-version.sh "$GITHUB_REF_NAME" \
+            ashdrop/cli/build.zig.zon ashdrop/web/static/cli-version)
           printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
           printf 'VERSION=%s\n' "$version" >>"$GITHUB_ENV"
 

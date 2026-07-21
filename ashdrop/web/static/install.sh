@@ -159,201 +159,52 @@ curl_download() {
 }
 
 if ! $version_set; then
-	api_test_http=false
-	if [ "${ASHDROP_RELEASES_API_URL+x}" = x ]; then
-		releases_api_url=${ASHDROP_RELEASES_API_URL%/}
-		case $releases_api_url in
+	pointer_test_http=false
+	if [ "${ASHDROP_CLI_VERSION_URL+x}" = x ]; then
+		cli_version_url=$ASHDROP_CLI_VERSION_URL
+		case $cli_version_url in
 			http://*)
-				api_authority=${releases_api_url#http://}
-				api_authority=${api_authority%%/*}
-				case $api_authority in
+				pointer_authority=${cli_version_url#http://}
+				pointer_authority=${pointer_authority%%/*}
+				case $pointer_authority in
 					127.0.0.1 | localhost | '[::1]') ;;
 					127.0.0.1:* | localhost:*)
-						api_port=${api_authority#*:}
-						case $api_port in '' | *[!0-9]*) die 'HTTP releases API override must use a loopback host' ;; esac
+						pointer_port=${pointer_authority#*:}
+						case $pointer_port in '' | *[!0-9]*) die 'pointer override must use a loopback host' ;; esac
 						;;
 					'[::1]:'*)
-						api_port=${api_authority#'[::1]:'}
-						case $api_port in '' | *[!0-9]*) die 'HTTP releases API override must use a loopback host' ;; esac
+						pointer_port=${pointer_authority#'[::1]:'}
+						case $pointer_port in '' | *[!0-9]*) die 'pointer override must use a loopback host' ;; esac
 						;;
-					*) die 'HTTP releases API override must use a loopback host' ;;
+					*) die 'pointer override must use a loopback host' ;;
 				esac
-				api_test_http=true
+				pointer_test_http=true
 				;;
-			*) die 'releases API override must use a loopback host' ;;
+			*) die 'pointer override must use a loopback host' ;;
 		esac
 	else
-		releases_api_url='https://api.github.com/repos/abdullah4tech/ashdrop/releases'
+		cli_version_url=https://ashdrop.vercel.app/cli-version
 	fi
 
-	api_response=$tmp_dir/releases.json
-	command -v awk >/dev/null 2>&1 || die 'required command not found: awk'
-	api_page=1
-	api_max_pages=10
-	while [ "$api_page" -le "$api_max_pages" ]; do
-		case $api_page in '' | *[!0-9]*) die 'invalid releases API page number' ;; esac
-		case $releases_api_url in
-			*\?*) api_page_url=$releases_api_url"&per_page=100&page=$api_page" ;;
-			*) api_page_url=$releases_api_url"?per_page=100&page=$api_page" ;;
-		esac
-		if $api_test_http; then
-			curl --fail --silent --show-error --max-filesize 8388608 \
-				--proto '=http' --proto-redir '=http' \
-				--output "$api_response" "$api_page_url" || die 'failed to query releases API'
-		else
-			curl --fail --silent --show-error --max-filesize 8388608 \
-				--proto '=https' --proto-redir '=https' --tlsv1.2 \
-				--header 'Accept: application/vnd.github+json' \
-				--header 'X-GitHub-Api-Version: 2022-11-28' \
-				--output "$api_response" "$api_page_url" || die 'failed to query releases API'
-		fi
-		api_size=$(wc -c <"$api_response")
-		[ "$api_size" -le 8388608 ] || die 'releases API response exceeds size limit'
-
-		if api_result=$(awk '
-		function bad() { exit 2 }
-		function ws(    c) {
-			while (p <= n) {
-				c = substr(json, p, 1)
-				if (c !~ /[ \t\r\n]/) break
-				p++
-			}
-		}
-		function string(    c, e, h, s) {
-			if (substr(json, p, 1) != "\"") bad()
-			p++; s = ""
-			while (p <= n) {
-				c = substr(json, p++, 1)
-				if (c == "\"") { value = s; return }
-				if (c == "\\") {
-					if (p > n) bad()
-					e = substr(json, p++, 1)
-					if (e == "\"" || e == "\\" || e == "/") s = s e
-					else if (e ~ /^[bfnrt]$/) s = s "?"
-					else if (e == "u") {
-						h = substr(json, p, 4)
-						if (length(h) != 4 || h !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) bad()
-						p += 4; s = s "?"
-					} else bad()
-				} else {
-					if (c ~ /[[:cntrl:]]/) bad()
-					s = s c
-				}
-			}
-			bad()
-		}
-		function number(    c) {
-			if (substr(json, p, 1) == "-") p++
-			c = substr(json, p, 1)
-			if (c == "0") { p++; if (substr(json, p, 1) ~ /[0-9]/) bad() }
-			else if (c ~ /[1-9]/) { while (substr(json, p, 1) ~ /[0-9]/) p++ }
-			else bad()
-			if (substr(json, p, 1) == ".") {
-				p++; if (substr(json, p, 1) !~ /[0-9]/) bad()
-				while (substr(json, p, 1) ~ /[0-9]/) p++
-			}
-			c = substr(json, p, 1)
-			if (c == "e" || c == "E") {
-				p++; c = substr(json, p, 1); if (c == "+" || c == "-") p++
-				if (substr(json, p, 1) !~ /[0-9]/) bad()
-				while (substr(json, p, 1) ~ /[0-9]/) p++
-			}
-			type = "number"
-		}
-		function array(    c) {
-			p++; ws(); if (substr(json, p, 1) == "]") { p++; return }
-			while (1) {
-				item(); ws(); c = substr(json, p++, 1)
-				if (c == "]") return
-				if (c != ",") bad()
-				ws()
-			}
-		}
-		function object(    c) {
-			p++; ws(); if (substr(json, p, 1) == "}") { p++; return }
-			while (1) {
-				string(); ws(); if (substr(json, p++, 1) != ":") bad()
-				ws(); item(); ws(); c = substr(json, p++, 1)
-				if (c == "}") return
-				if (c != ",") bad()
-				ws()
-			}
-		}
-		function item(    c) {
-			ws(); c = substr(json, p, 1)
-			if (c == "\"") { string(); type = "string" }
-			else if (c == "{") { object(); type = "object" }
-			else if (c == "[") { array(); type = "array" }
-			else if (substr(json, p, 4) == "true") { p += 4; type = "bool"; value = "true" }
-			else if (substr(json, p, 5) == "false") { p += 5; type = "bool"; value = "false" }
-			else if (substr(json, p, 4) == "null") { p += 4; type = "null"; value = "null" }
-			else if (c == "-" || c ~ /[0-9]/) number()
-			else bad()
-		}
-		function release(    c, key, tag, draft, pre, tag_n, draft_n, pre_n) {
-			release_count++
-			if (substr(json, p++, 1) != "{") bad()
-			ws(); if (substr(json, p, 1) == "}") bad()
-			while (1) {
-				string(); key = value; ws(); if (substr(json, p++, 1) != ":") bad()
-				ws(); item()
-				if (key == "tag_name") { if (++tag_n != 1 || type != "string") bad(); tag = value }
-				else if (key == "draft") { if (++draft_n != 1 || type != "bool") bad(); draft = value }
-				else if (key == "prerelease") { if (++pre_n != 1 || type != "bool") bad(); pre = value }
-				ws(); c = substr(json, p++, 1)
-				if (c == "}") break
-				if (c != ",") bad()
-				ws()
-			}
-			if (tag_n != 1 || draft_n != 1 || pre_n != 1) bad()
-			if (!found && draft == "false" && pre == "false" &&
-				tag ~ /^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) {
-				selected = substr(tag, 6); found = 1
-			}
-		}
-		function root(    c) {
-			ws(); if (substr(json, p++, 1) != "[") bad()
-			ws(); if (substr(json, p, 1) == "]") { p++; return }
-			while (1) {
-				release(); ws(); c = substr(json, p++, 1)
-				if (c == "]") break
-				if (c != ",") bad()
-				ws()
-			}
-			ws(); if (p <= n) bad()
-		}
-		{ json = json $0 "\n" }
-		END {
-			n = length(json); p = 1; root()
-			if (found) print "found:" selected ":" release_count
-			else print "none:" (release_count + 0)
-		}
-		' "$api_response"); then
-			case $api_result in
-				found:*:*)
-					version=${api_result#found:}
-					api_release_count=${version##*:}
-					version=${version%:*}
-					;;
-				none:*) api_release_count=${api_result#none:} ;;
-				*) die 'malformed releases API response' ;;
-			esac
-			case $api_release_count in '' | *[!0-9]*) die 'malformed releases API response' ;; esac
-			[ "$api_release_count" -le 100 ] || die 'malformed releases API response'
-			case $api_result in
-				found:*)
-					valid_version "$version" || die 'malformed releases API response'
-					break
-					;;
-			esac
-		else
-			die 'malformed releases API response'
-		fi
-		if [ "$api_release_count" -lt 100 ] || [ "$api_page" -eq "$api_max_pages" ]; then
-			die 'no stable CLI release found in releases API response'
-		fi
-		api_page=$((api_page + 1))
-	done
+	pointer_response=$tmp_dir/cli-version
+	if $pointer_test_http; then
+		curl --fail --silent --show-error --max-filesize 32 \
+			--proto '=http' --proto-redir '=http' \
+			--output "$pointer_response" "$cli_version_url" || die 'failed to fetch CLI version pointer'
+	else
+		curl --fail --silent --show-error --max-filesize 32 \
+			--proto '=https' --proto-redir '=https' --tlsv1.2 \
+			--output "$pointer_response" "$cli_version_url" || die 'failed to fetch CLI version pointer'
+	fi
+	pointer_size=$(wc -c <"$pointer_response")
+	[ "$pointer_size" -le 32 ] || die 'CLI version pointer exceeds size limit'
+	if IFS= read -r version <"$pointer_response"; then
+		valid_version "$version" || die 'malformed CLI version pointer'
+		expected_pointer_size=$((${#version} + 1))
+		[ "$pointer_size" -eq "$expected_pointer_size" ] || die 'malformed CLI version pointer'
+	else
+		die 'malformed CLI version pointer'
+	fi
 fi
 
 archive_name=ashdrop-v$version-linux-$arch.tar.gz
