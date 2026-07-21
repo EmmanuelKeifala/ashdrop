@@ -242,10 +242,14 @@ verified_binary=$tmp_dir/extracted/ashdrop
 
 if $system; then
 	system_install_dir=${ASHDROP_SYSTEM_INSTALL_DIR:-/usr/local/bin}
+	while [ "$system_install_dir" != / ] && [ "${system_install_dir%/}" != "$system_install_dir" ]; do
+		system_install_dir=${system_install_dir%/}
+	done
 	case $system_install_dir in
 		/*) ;;
 		*) die 'system install directory must be an absolute path' ;;
 	esac
+	[ ! -L "$system_install_dir" ] || die 'system install directory must not be a symlink'
 	command -v sudo >/dev/null 2>&1 || die 'required command not found: sudo'
 	sudo /bin/sh -c '
 		set -eu

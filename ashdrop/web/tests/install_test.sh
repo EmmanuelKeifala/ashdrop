@@ -4,6 +4,9 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 INSTALLER=$ROOT/static/install.sh
 ORIGINAL_PATH=$PATH
+POSIX_SH=$(command -v sh)
+REAL_STAT=$(command -v stat)
+export POSIX_SH REAL_STAT
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ashdrop-installer-tests.XXXXXX")
 SERVER_PID=
 
@@ -18,6 +21,9 @@ trap cleanup 0 1 2 3 15
 
 tests=0
 failures=0
+assertions=0
+test_active=false
+test_passed=false
 
 fail() {
 	printf 'not ok %s - %s\n' "$tests" "$1"
@@ -25,8 +31,11 @@ fail() {
 }
 
 begin_test() {
+	finish_test
 	tests=$((tests + 1))
 	FAILURES_BEFORE=$failures
+	test_active=true
+	test_passed=false
 	TEST_NAME=$1
 	CASE_DIR=$TEST_ROOT/case-$tests
 	mkdir -p "$CASE_DIR/bin" "$CASE_DIR/home" "$CASE_DIR/tmp"
@@ -50,13 +59,13 @@ EOF
 	XDG_BIN_HOME=
 	TEST_UNAME_S=Linux
 	TEST_UNAME_M=x86_64
-	unset ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR
+	unset ASHDROP_EXECUTION_MARKER ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR
 	export PATH HOME TMPDIR XDG_BIN_HOME TEST_UNAME_S TEST_UNAME_M CASE_DIR
 }
 
 run_installer() {
 	set +e
-	sh "$INSTALLER" "$@" >"$CASE_DIR/stdout" 2>"$CASE_DIR/stderr"
+	"$POSIX_SH" "$INSTALLER" "$@" >"$CASE_DIR/stdout" 2>"$CASE_DIR/stderr"
 	STATUS=$?
 	set -e
 }
@@ -83,7 +92,17 @@ expect_stderr() {
 }
 
 pass() {
+	test_passed=true
 	printf 'ok %s - %s\n' "$tests" "$TEST_NAME"
+}
+
+finish_test() {
+	$test_active || return 0
+	if ! $test_passed && [ "$failures" -eq "$FAILURES_BEFORE" ]; then
+		fail "$TEST_NAME: assertions completed without recording a result"
+	fi
+	assertions=$((assertions + 1))
+	test_active=false
 }
 
 ensure_failure() {
@@ -107,7 +126,7 @@ import sys
 root = pathlib.Path(sys.argv[1])
 
 def add_member(output, name, kind="file", mode=0o755):
-    data = b"#!/bin/sh\necho ashdrop\n"
+    data = b"#!/bin/sh\n[ -z \"${ASHDROP_EXECUTION_MARKER:-}\" ] || : >\"$ASHDROP_EXECUTION_MARKER\"\n"
     member = tarfile.TarInfo(name)
     member.mode = mode
     if kind == "file":
@@ -224,6 +243,50 @@ PY
 	done
 	PORT=$(cat "$PORT_FILE")
 	RELEASES_BASE=http://127.0.0.1:$PORT/releases
+	TEST_DIGEST=$(awk '{ print $1; exit }' "$FIXTURES/cli-v1.2.3/SHA256SUMS")
+	export TEST_DIGEST
+}
+
+isolate_installer_path() {
+	ISOLATED_TOOLS=$CASE_DIR/tools
+	mkdir "$ISOLATED_TOOLS"
+	for tool in awk tar gzip wc tr mkdir rm mktemp cp chmod mv curl cat grep; do
+		tool_path=$(PATH=$ORIGINAL_PATH command -v "$tool")
+		ln -s "$tool_path" "$ISOLATED_TOOLS/$tool"
+	done
+	rm "$CASE_DIR/bin/curl"
+	PATH=$CASE_DIR/bin:$ISOLATED_TOOLS
+	export PATH
+}
+
+add_digest_tool() {
+	case $1 in
+		sha256sum)
+			cat >"$ISOLATED_TOOLS/sha256sum" <<'EOF'
+#!/bin/sh
+printf 'sha256sum\n' >>"$CASE_DIR/digest-tools.log"
+printf '%s  %s\n' "$TEST_DIGEST" "$1"
+EOF
+			;;
+		shasum)
+			cat >"$ISOLATED_TOOLS/shasum" <<'EOF'
+#!/bin/sh
+printf 'shasum\n' >>"$CASE_DIR/digest-tools.log"
+[ "$1" = -a ] && [ "$2" = 256 ] || exit 97
+shift 2
+printf '%s  %s\n' "$TEST_DIGEST" "$1"
+EOF
+			;;
+		openssl)
+			cat >"$ISOLATED_TOOLS/openssl" <<'EOF'
+#!/bin/sh
+printf 'openssl\n' >>"$CASE_DIR/digest-tools.log"
+[ "$1" = dgst ] && [ "$2" = -sha256 ] || exit 97
+printf 'SHA2-256(%s)= %s\n' "$3" "$TEST_DIGEST"
+EOF
+			;;
+	esac
+	chmod +x "$ISOLATED_TOOLS/$1"
 }
 
 begin_test 'help exits without side effects'
@@ -236,27 +299,59 @@ else
 fi
 
 for bad_args in \
-	'--unknown' \
-	'--version' \
-	'--version 1.2.3 --version 1.2.4' \
-	'--install-dir' \
-	'--install-dir /tmp/a --install-dir /tmp/b' \
-	'--system --system' \
-	'--system --install-dir /tmp/a' \
-	'--version 1.2' \
-	'--version 1.2.3-alpha' \
-	'--version 01.2.3' \
-	'--version 1.02.3' \
-	'--version 1.2.03'
+	'--unknown|unknown argument' \
+	'--version|requires a value' \
+	'--version 1.2.3 --version 1.2.4|only be specified once' \
+	'--install-dir|requires a value' \
+	'--install-dir /tmp/a --install-dir /tmp/b|only be specified once' \
+	'--system --system|only be specified once' \
+	'--system --install-dir /tmp/a|cannot be combined' \
+	'--version 1.2|invalid stable version' \
+	'--version 1.2.3-alpha|invalid stable version' \
+	'--version 01.2.3|invalid stable version' \
+	'--version 1.02.3|invalid stable version' \
+	'--version 1.2.03|invalid stable version'
 do
+	expected_error=${bad_args##*|}
+	bad_args=${bad_args%|*}
 	begin_test "rejects arguments: $bad_args"
 	# The cases contain only controlled words and paths; splitting is intentional.
 	# shellcheck disable=SC2086
 	run_installer $bad_args
-	if expect_failure && [ ! -e "$CASE_DIR/curl.log" ]; then
+	if expect_failure && expect_stderr "$expected_error" && [ ! -e "$CASE_DIR/curl.log" ]; then
 		pass
 	fi
 done
+
+begin_test 'production curl enforces HTTPS protocols and TLS 1.2'
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'failed to download' &&
+	grep -F -- '--proto =https' "$CASE_DIR/curl.log" >/dev/null &&
+	grep -F -- '--proto-redir =https' "$CASE_DIR/curl.log" >/dev/null &&
+	grep -F -- '--tlsv1.2' "$CASE_DIR/curl.log" >/dev/null; then
+	pass
+fi
+
+begin_test 'creates a private temporary directory before download'
+cat >"$CASE_DIR/bin/curl" <<'EOF'
+#!/bin/sh
+output=
+while [ "$#" -gt 0 ]; do
+	if [ "$1" = --output ]; then
+		output=$2
+		break
+	fi
+	shift
+done
+[ -n "$output" ] || exit 96
+"$REAL_STAT" -c %a "${output%/*}" >"$CASE_DIR/temp-mode"
+exit 88
+EOF
+chmod +x "$CASE_DIR/bin/curl"
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'failed to download' && [ "$(cat "$CASE_DIR/temp-mode")" = 700 ]; then
+	pass
+fi
 
 begin_test 'rejects an empty install directory before network access'
 run_installer --version 1.2.3 --install-dir ''
@@ -369,6 +464,48 @@ do
 	fi
 done
 
+begin_test 'selects sha256sum before other digest tools'
+isolate_installer_path
+add_digest_tool sha256sum
+add_digest_tool shasum
+add_digest_tool openssl
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_status 0 && [ "$(cat "$CASE_DIR/digest-tools.log")" = sha256sum ]; then
+	pass
+fi
+
+begin_test 'falls back to shasum when sha256sum is unavailable'
+isolate_installer_path
+add_digest_tool shasum
+add_digest_tool openssl
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_status 0 && [ "$(cat "$CASE_DIR/digest-tools.log")" = shasum ]; then
+	pass
+fi
+
+begin_test 'falls back to openssl when sum tools are unavailable'
+isolate_installer_path
+add_digest_tool openssl
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_status 0 && [ "$(cat "$CASE_DIR/digest-tools.log")" = openssl ]; then
+	pass
+fi
+
+begin_test 'fails when no SHA-256 utility is available'
+isolate_installer_path
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'required SHA-256 tool' && [ ! -e "$CASE_DIR/install/ashdrop" ]; then
+	pass
+fi
+
 begin_test 'installs into the default user directory'
 rm "$CASE_DIR/bin/curl"
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
@@ -446,11 +583,73 @@ export ASHDROP_RELEASES_BASE_URL
 mkdir "$CASE_DIR/custom-bin"
 printf 'sentinel\n' >"$CASE_DIR/custom-bin/ashdrop"
 run_installer --version 2.0.0 --install-dir "$CASE_DIR/custom-bin"
-if expect_failure && [ "$(cat "$CASE_DIR/custom-bin/ashdrop")" = sentinel ] &&
-	[ ! -s "$CASE_DIR/stdout" ]; then
+set -- "$TMPDIR"/ashdrop-install.*
+if expect_failure && expect_stderr 'checksum mismatch' &&
+	[ "$(cat "$CASE_DIR/custom-bin/ashdrop")" = sentinel ] &&
+	[ ! -s "$CASE_DIR/stdout" ] && [ ! -e "$1" ]; then
 	pass
 else
 	ensure_failure "$TEST_NAME: existing binary or success output changed"
+fi
+
+begin_test 'download failure cleans temporary files and preserves destination'
+mkdir "$CASE_DIR/custom-bin"
+printf 'sentinel\n' >"$CASE_DIR/custom-bin/ashdrop"
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/custom-bin"
+set -- "$TMPDIR"/ashdrop-install.*
+if expect_failure && expect_stderr 'failed to download' &&
+	[ "$(cat "$CASE_DIR/custom-bin/ashdrop")" = sentinel ] && [ ! -e "$1" ]; then
+	pass
+fi
+
+begin_test 'copy failure removes pending file and preserves destination'
+rm "$CASE_DIR/bin/curl"
+cat >"$CASE_DIR/bin/cp" <<'EOF'
+#!/bin/sh
+exit 93
+EOF
+chmod +x "$CASE_DIR/bin/cp"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+mkdir "$CASE_DIR/custom-bin"
+printf 'sentinel\n' >"$CASE_DIR/custom-bin/ashdrop"
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/custom-bin"
+set -- "$CASE_DIR/custom-bin"/.ashdrop.*
+pending_path=$1
+set -- "$TMPDIR"/ashdrop-install.*
+if expect_failure && expect_stderr 'could not copy' && [ ! -e "$pending_path" ] &&
+	[ ! -e "$1" ] && [ "$(cat "$CASE_DIR/custom-bin/ashdrop")" = sentinel ]; then
+	pass
+fi
+
+begin_test 'move failure removes pending file and preserves destination'
+rm "$CASE_DIR/bin/curl"
+cat >"$CASE_DIR/bin/mv" <<'EOF'
+#!/bin/sh
+exit 94
+EOF
+chmod +x "$CASE_DIR/bin/mv"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+mkdir "$CASE_DIR/custom-bin"
+printf 'sentinel\n' >"$CASE_DIR/custom-bin/ashdrop"
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/custom-bin"
+set -- "$CASE_DIR/custom-bin"/.ashdrop.*
+pending_path=$1
+set -- "$TMPDIR"/ashdrop-install.*
+if expect_failure && expect_stderr 'atomically replace' && [ ! -e "$pending_path" ] &&
+	[ ! -e "$1" ] && [ "$(cat "$CASE_DIR/custom-bin/ashdrop")" = sentinel ]; then
+	pass
+fi
+
+begin_test 'never executes the downloaded binary'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_EXECUTION_MARKER=$CASE_DIR/executed
+export ASHDROP_RELEASES_BASE_URL ASHDROP_EXECUTION_MARKER
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/custom-bin"
+if expect_status 0 && [ ! -e "$ASHDROP_EXECUTION_MARKER" ]; then
+	pass
 fi
 
 begin_test 'atomically replaces through a destination-adjacent temporary file'
@@ -522,6 +721,25 @@ else
 	ensure_failure "$TEST_NAME: system installation did not use one verified sudo call"
 fi
 
+begin_test 'rejects a symlink system install directory before sudo'
+rm "$CASE_DIR/bin/curl"
+cat >"$CASE_DIR/bin/sudo" <<'EOF'
+#!/bin/sh
+printf 'called\n' >>"$CASE_DIR/sudo.log"
+exit 99
+EOF
+chmod +x "$CASE_DIR/bin/sudo"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+mkdir "$CASE_DIR/real-system-bin"
+ln -s "$CASE_DIR/real-system-bin" "$CASE_DIR/link-system-bin"
+ASHDROP_SYSTEM_INSTALL_DIR=$CASE_DIR/link-system-bin
+export ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR
+run_installer --version 1.2.3 --system
+if expect_failure && expect_stderr 'symlink' && [ ! -e "$CASE_DIR/sudo.log" ] &&
+	[ ! -e "$CASE_DIR/real-system-bin/ashdrop" ]; then
+	pass
+fi
+
 begin_test 'failed system verification never invokes sudo or replaces destination'
 rm "$CASE_DIR/bin/curl"
 cat >"$CASE_DIR/bin/sudo" <<'EOF'
@@ -536,12 +754,14 @@ export ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR
 mkdir "$ASHDROP_SYSTEM_INSTALL_DIR"
 printf 'sentinel\n' >"$ASHDROP_SYSTEM_INSTALL_DIR/ashdrop"
 run_installer --version 2.0.0 --system
-if expect_failure && [ ! -e "$CASE_DIR/sudo.log" ] &&
+if expect_failure && expect_stderr 'checksum mismatch' && [ ! -e "$CASE_DIR/sudo.log" ] &&
 	[ "$(cat "$ASHDROP_SYSTEM_INSTALL_DIR/ashdrop")" = sentinel ]; then
 	pass
 else
 	ensure_failure "$TEST_NAME: sudo ran or destination changed before verification"
 fi
 
-printf '%s tests, %s failures\n' "$tests" "$failures"
+finish_test
+printf '%s tests, %s assertions, %s failures\n' "$tests" "$assertions" "$failures"
+[ "$assertions" -eq "$tests" ]
 [ "$failures" -eq 0 ]
