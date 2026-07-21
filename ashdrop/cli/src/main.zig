@@ -1,6 +1,7 @@
 //! Defines the Ashdrop command-line entry point, dispatch, diagnostics, and address command.
 
 const std = @import("std");
+const build_options = @import("build_options");
 const config = @import("config.zig");
 const commands = @import("commands.zig");
 const crypto = @import("crypto.zig");
@@ -35,6 +36,9 @@ pub fn main(init: std.process.Init) u8 {
         const status = writeFailure(&stderr.interface, error.CommandFailed);
         return finishCommand(status, &stdout.interface, &stderr.interface);
     };
+    if (runEarlyCommand(args[1..], &stdout.interface, &stderr.interface)) |status| {
+        return finishCommand(status, &stdout.interface, &stderr.interface);
+    }
     const home = init.environ_map.get("HOME") orelse {
         const status = writeFailure(&stderr.interface, error.HomeMissing);
         return finishCommand(status, &stdout.interface, &stderr.interface);
@@ -50,6 +54,13 @@ pub fn main(init: std.process.Init) u8 {
         .stderr = &stderr.interface,
     });
     return finishCommand(status, &stdout.interface, &stderr.interface);
+}
+
+fn runEarlyCommand(args: []const []const u8, stdout: *std.Io.Writer, stderr: *std.Io.Writer) ?u8 {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "--version")) return null;
+    if (args.len != 1) return writeFailure(stderr, error.Usage);
+    stdout.print("ashdrop {s}\n", .{build_options.version}) catch |err| return writeFailure(stderr, err);
+    return 0;
 }
 
 fn runCommand(args: anytype, runtime: AddressRuntime) u8 {
@@ -226,6 +237,30 @@ test {
     _ = @import("crypto_test.zig");
     _ = @import("links.zig");
     _ = @import("identity.zig");
+}
+
+test "version reports the configured build version without diagnostics" {
+    var stdout = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer stderr.deinit();
+    const args = [_][]const u8{"--version"};
+
+    try std.testing.expectEqual(@as(?u8, 0), runEarlyCommand(&args, &stdout.writer, &stderr.writer));
+    try std.testing.expectEqualStrings("ashdrop " ++ build_options.version ++ "\n", stdout.written());
+    try std.testing.expectEqual(@as(usize, 0), stderr.written().len);
+}
+
+test "version rejects extra arguments with usage status" {
+    var stdout = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer stdout.deinit();
+    var stderr = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer stderr.deinit();
+    const args = [_][]const u8{ "--version", "extra" };
+
+    try std.testing.expectEqual(@as(?u8, 2), runEarlyCommand(&args, &stdout.writer, &stderr.writer));
+    try std.testing.expectEqual(@as(usize, 0), stdout.written().len);
+    try std.testing.expectEqualStrings("usage: ashdrop <address|share|pull|inbox> [options]\n", stderr.written());
 }
 
 test "address parser accepts create with endpoint overrides" {

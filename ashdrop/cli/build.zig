@@ -3,8 +3,15 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const package_version = "0.1.0";
+    const development_version = package_version ++ "-dev";
+    const version = b.option([]const u8, "version", "Ashdrop version") orelse development_version;
+    _ = std.SemanticVersion.parse(version) catch @panic("-Dversion must be a semantic version");
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
 
     const exe = b.addExecutable(.{
         .name = "ashdrop",
@@ -14,6 +21,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addOptions("build_options", build_options);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -35,6 +43,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    tests.root_module.addOptions("build_options", build_options);
     const run_tests = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run CLI unit tests");
     test_step.dependOn(&run_tests.step);
