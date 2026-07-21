@@ -32,6 +32,8 @@ fail() {
 
 begin_test() {
 	finish_test
+	PATH=$ORIGINAL_PATH
+	export PATH
 	tests=$((tests + 1))
 	FAILURES_BEFORE=$failures
 	test_active=true
@@ -619,6 +621,28 @@ pending_path=$1
 set -- "$TMPDIR"/ashdrop-install.*
 if expect_failure && expect_stderr 'could not copy' && [ ! -e "$pending_path" ] &&
 	[ ! -e "$1" ] && [ "$(cat "$CASE_DIR/custom-bin/ashdrop")" = sentinel ]; then
+	pass
+fi
+
+begin_test 'chmod failure removes pending file and preserves destination'
+rm "$CASE_DIR/bin/curl"
+cat >"$CASE_DIR/bin/chmod" <<'EOF'
+#!/bin/sh
+exit 95
+EOF
+/bin/chmod +x "$CASE_DIR/bin/chmod"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+mkdir "$CASE_DIR/custom-bin"
+printf 'sentinel\n' >"$CASE_DIR/custom-bin/ashdrop"
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/custom-bin"
+set -- "$CASE_DIR/custom-bin"/.ashdrop.*
+pending_path=$1
+set -- "$TMPDIR"/ashdrop-install.*
+if expect_failure && expect_stderr 'could not set executable permissions' &&
+	[ ! -e "$pending_path" ] && [ ! -e "$1" ] &&
+	[ "$(cat "$CASE_DIR/custom-bin/ashdrop")" = sentinel ] &&
+	[ ! -s "$CASE_DIR/stdout" ]; then
 	pass
 fi
 
