@@ -207,9 +207,11 @@ port_file = pathlib.Path(sys.argv[3])
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        path = urllib.parse.urlsplit(self.path).path
+        request = urllib.parse.urlsplit(self.path)
+        path = request.path
+        query = urllib.parse.parse_qs(request.query)
         with request_log.open("a") as output:
-            output.write(path + "\n")
+            output.write(self.path + "\n")
         api_responses = {
             "/api/releases": [
                 {"tag_name": "web-v9.0.0", "draft": False, "prerelease": False},
@@ -232,6 +234,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
         }
         if path in api_responses:
             body = json.dumps(api_responses[path]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path in {"/api/paginated", "/api/terminal", "/api/malformed-later"}:
+            page = query.get("page", [""])
+            per_page = query.get("per_page", [""])
+            if page == ["1"] and per_page == ["100"]:
+                body = json.dumps([
+                    {"tag_name": f"web-v9.0.{index}", "draft": False, "prerelease": False}
+                    for index in range(100)
+                ]).encode()
+            elif page == ["2"] and per_page == ["100"] and path == "/api/paginated":
+                body = json.dumps([
+                    {"tag_name": "cli-v1.2.3", "draft": False, "prerelease": False}
+                ]).encode()
+            elif page == ["2"] and per_page == ["100"] and path == "/api/terminal":
+                body = b"[]"
+            elif page == ["2"] and per_page == ["100"] and path == "/api/malformed-later":
+                body = b'[{"tag_name":"cli-v1.2.3","draft":false,"prerelease":false}'
+            else:
+                self.send_error(404)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -429,7 +456,7 @@ fi
 begin_test 'production default uses bounded HTTPS releases API query'
 run_installer --install-dir "$CASE_DIR/install"
 if expect_failure && expect_stderr 'failed to query releases API' &&
-	grep -F 'https://api.github.com/repos/abdullah4tech/ashdrop/releases?per_page=100' "$CASE_DIR/curl.log" >/dev/null &&
+	grep -F 'https://api.github.com/repos/abdullah4tech/ashdrop/releases?per_page=100&page=1' "$CASE_DIR/curl.log" >/dev/null &&
 	grep -F -- '--proto =https' "$CASE_DIR/curl.log" >/dev/null &&
 	grep -F -- '--proto-redir =https' "$CASE_DIR/curl.log" >/dev/null &&
 	grep -F -- '--tlsv1.2' "$CASE_DIR/curl.log" >/dev/null; then
@@ -481,13 +508,56 @@ ASHDROP_RELEASES_API_URL=$RELEASES_API
 export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
 : >"$REQUEST_LOG"
 run_installer --install-dir "$CASE_DIR/install"
-api_count=$(grep -c '^/api/releases$' "$REQUEST_LOG" || true)
+api_count=$(grep -c '^/api/releases?' "$REQUEST_LOG" || true)
 if expect_status 0 && [ "$api_count" -eq 1 ] && ! grep -F '/releases/latest' "$REQUEST_LOG" >/dev/null &&
 	grep -F '/releases/download/cli-v1.2.3/ashdrop-v1.2.3-linux-x86_64.tar.gz' "$REQUEST_LOG" >/dev/null &&
 	grep -F '/releases/download/cli-v1.2.3/SHA256SUMS' "$REQUEST_LOG" >/dev/null; then
 	pass
 else
 	ensure_failure "$TEST_NAME: expected one API request and immutable asset requests"
+fi
+
+begin_test 'continues discovery when the first API page is full'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/paginated
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+: >"$REQUEST_LOG"
+run_installer --install-dir "$CASE_DIR/install"
+if expect_status 0 &&
+	[ "$(grep -c '^/api/paginated?per_page=100&page=1$' "$REQUEST_LOG" || true)" -eq 1 ] &&
+	[ "$(grep -c '^/api/paginated?per_page=100&page=2$' "$REQUEST_LOG" || true)" -eq 1 ] &&
+	grep -F '/releases/download/cli-v1.2.3/ashdrop-v1.2.3-linux-x86_64.tar.gz' "$REQUEST_LOG" >/dev/null; then
+	pass
+else
+	ensure_failure "$TEST_NAME: expected discovery to continue to page 2"
+fi
+
+begin_test 'stops after a terminal API page with no stable CLI release'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/terminal
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+: >"$REQUEST_LOG"
+run_installer --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'no stable CLI release' &&
+	[ "$(grep -c '^/api/terminal?per_page=100&page=1$' "$REQUEST_LOG" || true)" -eq 1 ] &&
+	[ "$(grep -c '^/api/terminal?per_page=100&page=2$' "$REQUEST_LOG" || true)" -eq 1 ] &&
+	[ "$(wc -l <"$REQUEST_LOG")" -eq 2 ]; then
+	pass
+fi
+
+begin_test 'fails closed when a later API page is malformed'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/malformed-later
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+: >"$REQUEST_LOG"
+run_installer --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'malformed releases API response' &&
+	[ "$(grep -c '^/api/malformed-later?per_page=100&page=1$' "$REQUEST_LOG" || true)" -eq 1 ] &&
+	[ "$(grep -c '^/api/malformed-later?per_page=100&page=2$' "$REQUEST_LOG" || true)" -eq 1 ]; then
+	pass
 fi
 
 begin_test 'ignores a newer non-CLI release'

@@ -183,26 +183,34 @@ if ! $version_set; then
 			*) die 'releases API override must use a loopback host' ;;
 		esac
 	else
-		releases_api_url='https://api.github.com/repos/abdullah4tech/ashdrop/releases?per_page=100'
+		releases_api_url='https://api.github.com/repos/abdullah4tech/ashdrop/releases'
 	fi
 
 	api_response=$tmp_dir/releases.json
-	if $api_test_http; then
-		curl --fail --silent --show-error --max-filesize 8388608 \
-			--proto '=http' --proto-redir '=http' \
-			--output "$api_response" "$releases_api_url" || die 'failed to query releases API'
-	else
-		curl --fail --silent --show-error --max-filesize 8388608 \
-			--proto '=https' --proto-redir '=https' --tlsv1.2 \
-			--header 'Accept: application/vnd.github+json' \
-			--header 'X-GitHub-Api-Version: 2022-11-28' \
-			--output "$api_response" "$releases_api_url" || die 'failed to query releases API'
-	fi
-	api_size=$(wc -c <"$api_response")
-	[ "$api_size" -le 8388608 ] || die 'releases API response exceeds size limit'
 	command -v awk >/dev/null 2>&1 || die 'required command not found: awk'
+	api_page=1
+	api_max_pages=10
+	while [ "$api_page" -le "$api_max_pages" ]; do
+		case $api_page in '' | *[!0-9]*) die 'invalid releases API page number' ;; esac
+		case $releases_api_url in
+			*\?*) api_page_url=$releases_api_url"&per_page=100&page=$api_page" ;;
+			*) api_page_url=$releases_api_url"?per_page=100&page=$api_page" ;;
+		esac
+		if $api_test_http; then
+			curl --fail --silent --show-error --max-filesize 8388608 \
+				--proto '=http' --proto-redir '=http' \
+				--output "$api_response" "$api_page_url" || die 'failed to query releases API'
+		else
+			curl --fail --silent --show-error --max-filesize 8388608 \
+				--proto '=https' --proto-redir '=https' --tlsv1.2 \
+				--header 'Accept: application/vnd.github+json' \
+				--header 'X-GitHub-Api-Version: 2022-11-28' \
+				--output "$api_response" "$api_page_url" || die 'failed to query releases API'
+		fi
+		api_size=$(wc -c <"$api_response")
+		[ "$api_size" -le 8388608 ] || die 'releases API response exceeds size limit'
 
-	if version=$(awk '
+		if api_result=$(awk '
 		function bad() { exit 2 }
 		function ws(    c) {
 			while (p <= n) {
@@ -283,6 +291,7 @@ if ! $version_set; then
 			else bad()
 		}
 		function release(    c, key, tag, draft, pre, tag_n, draft_n, pre_n) {
+			release_count++
 			if (substr(json, p++, 1) != "{") bad()
 			ws(); if (substr(json, p, 1) == "}") bad()
 			while (1) {
@@ -316,18 +325,35 @@ if ! $version_set; then
 		{ json = json $0 "\n" }
 		END {
 			n = length(json); p = 1; root()
-			if (!found) exit 3
-			print selected
+			if (found) print "found:" selected ":" release_count
+			else print "none:" (release_count + 0)
 		}
-	' "$api_response"); then
-		valid_version "$version" || die 'malformed releases API response'
-	else
-		api_parse_status=$?
-		case $api_parse_status in
-			3) die 'no stable CLI release found in releases API response' ;;
-			*) die 'malformed releases API response' ;;
-		esac
-	fi
+		' "$api_response"); then
+			case $api_result in
+				found:*:*)
+					version=${api_result#found:}
+					api_release_count=${version##*:}
+					version=${version%:*}
+					;;
+				none:*) api_release_count=${api_result#none:} ;;
+				*) die 'malformed releases API response' ;;
+			esac
+			case $api_release_count in '' | *[!0-9]*) die 'malformed releases API response' ;; esac
+			[ "$api_release_count" -le 100 ] || die 'malformed releases API response'
+			case $api_result in
+				found:*)
+					valid_version "$version" || die 'malformed releases API response'
+					break
+					;;
+			esac
+		else
+			die 'malformed releases API response'
+		fi
+		if [ "$api_release_count" -lt 100 ] || [ "$api_page" -eq "$api_max_pages" ]; then
+			die 'no stable CLI release found in releases API response'
+		fi
+		api_page=$((api_page + 1))
+	done
 fi
 
 archive_name=ashdrop-v$version-linux-$arch.tar.gz
