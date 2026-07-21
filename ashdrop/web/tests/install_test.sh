@@ -5,8 +5,10 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 INSTALLER=$ROOT/static/install.sh
 ORIGINAL_PATH=$PATH
 POSIX_SH=$(command -v sh)
+REAL_CHMOD=$(command -v chmod)
+REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
-export POSIX_SH REAL_STAT
+export POSIX_SH REAL_CHMOD REAL_MV REAL_STAT
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ashdrop-installer-tests.XXXXXX")
 SERVER_PID=
 
@@ -270,6 +272,13 @@ printf 'sha256sum\n' >>"$CASE_DIR/digest-tools.log"
 printf '%s  %s\n' "$TEST_DIGEST" "$1"
 EOF
 			;;
+		sha256sum-fail)
+			cat >"$ISOLATED_TOOLS/sha256sum" <<'EOF'
+#!/bin/sh
+printf '%s  %s\n' "$TEST_DIGEST" "$1"
+exit 98
+EOF
+			;;
 		shasum)
 			cat >"$ISOLATED_TOOLS/shasum" <<'EOF'
 #!/bin/sh
@@ -277,6 +286,15 @@ printf 'shasum\n' >>"$CASE_DIR/digest-tools.log"
 [ "$1" = -a ] && [ "$2" = 256 ] || exit 97
 shift 2
 printf '%s  %s\n' "$TEST_DIGEST" "$1"
+EOF
+			;;
+		shasum-fail)
+			cat >"$ISOLATED_TOOLS/shasum" <<'EOF'
+#!/bin/sh
+[ "$1" = -a ] && [ "$2" = 256 ] || exit 97
+shift 2
+printf '%s  %s\n' "$TEST_DIGEST" "$1"
+exit 98
 EOF
 			;;
 		openssl)
@@ -288,7 +306,12 @@ printf 'SHA2-256(%s)= %s\n' "$3" "$TEST_DIGEST"
 EOF
 			;;
 	esac
-	chmod +x "$ISOLATED_TOOLS/$1"
+	case $1 in
+		sha256sum-fail) digest_tool_path=$ISOLATED_TOOLS/sha256sum ;;
+		shasum-fail) digest_tool_path=$ISOLATED_TOOLS/shasum ;;
+		*) digest_tool_path=$ISOLATED_TOOLS/$1 ;;
+	esac
+	chmod +x "$digest_tool_path"
 }
 
 begin_test 'help exits without side effects'
@@ -474,7 +497,8 @@ add_digest_tool openssl
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
 export ASHDROP_RELEASES_BASE_URL
 run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
-if expect_status 0 && [ "$(cat "$CASE_DIR/digest-tools.log")" = sha256sum ]; then
+if expect_status 0 && [ "$(grep -c '^sha256sum$' "$CASE_DIR/digest-tools.log")" -eq 2 ] &&
+	[ "$(wc -l <"$CASE_DIR/digest-tools.log")" -eq 2 ]; then
 	pass
 fi
 
@@ -485,7 +509,8 @@ add_digest_tool openssl
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
 export ASHDROP_RELEASES_BASE_URL
 run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
-if expect_status 0 && [ "$(cat "$CASE_DIR/digest-tools.log")" = shasum ]; then
+if expect_status 0 && [ "$(grep -c '^shasum$' "$CASE_DIR/digest-tools.log")" -eq 2 ] &&
+	[ "$(wc -l <"$CASE_DIR/digest-tools.log")" -eq 2 ]; then
 	pass
 fi
 
@@ -495,7 +520,8 @@ add_digest_tool openssl
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
 export ASHDROP_RELEASES_BASE_URL
 run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
-if expect_status 0 && [ "$(cat "$CASE_DIR/digest-tools.log")" = openssl ]; then
+if expect_status 0 && [ "$(grep -c '^openssl$' "$CASE_DIR/digest-tools.log")" -eq 2 ] &&
+	[ "$(wc -l <"$CASE_DIR/digest-tools.log")" -eq 2 ]; then
 	pass
 fi
 
@@ -505,6 +531,28 @@ ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
 export ASHDROP_RELEASES_BASE_URL
 run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
 if expect_failure && expect_stderr 'required SHA-256 tool' && [ ! -e "$CASE_DIR/install/ashdrop" ]; then
+	pass
+fi
+
+begin_test 'rejects digest output from a failing SHA-256 utility'
+isolate_installer_path
+add_digest_tool sha256sum-fail
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'SHA-256 calculation failed' &&
+	[ ! -e "$CASE_DIR/install/ashdrop" ]; then
+	pass
+fi
+
+begin_test 'rejects digest output from a failing shasum utility'
+isolate_installer_path
+add_digest_tool shasum-fail
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+export ASHDROP_RELEASES_BASE_URL
+run_installer --version 1.2.3 --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'SHA-256 calculation failed' &&
+	[ ! -e "$CASE_DIR/install/ashdrop" ]; then
 	pass
 fi
 
@@ -630,7 +678,7 @@ cat >"$CASE_DIR/bin/chmod" <<'EOF'
 #!/bin/sh
 exit 95
 EOF
-/bin/chmod +x "$CASE_DIR/bin/chmod"
+"$REAL_CHMOD" +x "$CASE_DIR/bin/chmod"
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
 export ASHDROP_RELEASES_BASE_URL
 mkdir "$CASE_DIR/custom-bin"
@@ -681,7 +729,7 @@ rm "$CASE_DIR/bin/curl"
 cat >"$CASE_DIR/bin/mv" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$CASE_DIR/mv.log"
-exec /bin/mv "$@"
+exec "$REAL_MV" "$@"
 EOF
 chmod +x "$CASE_DIR/bin/mv"
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
@@ -743,6 +791,26 @@ if expect_status 0 && [ "$sudo_count" -eq 1 ] && [ ! -e "$CASE_DIR/privileged-to
 	pass
 else
 	ensure_failure "$TEST_NAME: system installation did not use one verified sudo call"
+fi
+
+begin_test 'system install rejects a source swapped before privileged copy'
+rm "$CASE_DIR/bin/curl"
+cat >"$CASE_DIR/bin/sudo" <<'EOF'
+#!/bin/sh
+printf 'tampered\n' >"$5"
+exec "$@"
+EOF
+chmod +x "$CASE_DIR/bin/sudo"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_SYSTEM_INSTALL_DIR=$CASE_DIR/system-bin
+export ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR
+mkdir "$ASHDROP_SYSTEM_INSTALL_DIR"
+printf 'sentinel\n' >"$ASHDROP_SYSTEM_INSTALL_DIR/ashdrop"
+run_installer --version 1.2.3 --system
+set -- "$ASHDROP_SYSTEM_INSTALL_DIR"/.ashdrop.*
+if expect_failure && expect_stderr 'verified binary changed before system installation' &&
+	[ "$(cat "$ASHDROP_SYSTEM_INSTALL_DIR/ashdrop")" = sentinel ] && [ ! -e "$1" ]; then
+	pass
 fi
 
 begin_test 'rejects a symlink system install directory before sudo'

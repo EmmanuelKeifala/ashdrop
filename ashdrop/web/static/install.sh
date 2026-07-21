@@ -206,16 +206,31 @@ esac
 
 archive_path=$tmp_dir/$archive_name
 if command -v sha256sum >/dev/null 2>&1; then
-	set -- $(sha256sum "$archive_path")
-	actual_digest=$1
+	sha256_tool=sha256sum
 elif command -v shasum >/dev/null 2>&1; then
-	set -- $(shasum -a 256 "$archive_path")
-	actual_digest=$1
+	sha256_tool=shasum
 elif command -v openssl >/dev/null 2>&1; then
-	actual_digest=$(openssl dgst -sha256 "$archive_path" | awk '{ print $NF }')
+	sha256_tool=openssl
 else
 	die 'required SHA-256 tool not found (sha256sum, shasum, or openssl)'
 fi
+
+calculate_sha256() {
+	_digest_path=$1
+	case $sha256_tool in
+		sha256sum) _digest_output=$(sha256sum "$_digest_path") || return 1 ;;
+		shasum) _digest_output=$(shasum -a 256 "$_digest_path") || return 1 ;;
+		openssl)
+			_digest_output=$(openssl dgst -sha256 "$_digest_path") || return 1
+			_digest_output=$(printf '%s\n' "$_digest_output" | awk '{ print $NF }') || return 1
+			;;
+	esac
+	set -- $_digest_output
+	[ "$#" -ge 1 ] || return 1
+	printf '%s\n' "$1"
+}
+
+actual_digest=$(calculate_sha256 "$archive_path") || die "SHA-256 calculation failed with $sha256_tool"
 
 expected_digest=$(printf '%s' "$expected_digest" | tr 'A-F' 'a-f')
 actual_digest=$(printf '%s' "$actual_digest" | tr 'A-F' 'a-f')
@@ -239,6 +254,11 @@ tar -xzf "$archive_path" -C "$tmp_dir/extracted" || die 'unsafe archive: extract
 verified_binary=$tmp_dir/extracted/ashdrop
 [ -f "$verified_binary" ] && [ ! -L "$verified_binary" ] || die 'unsafe archive: ashdrop is not a regular file'
 [ -x "$verified_binary" ] || die 'extracted ashdrop is not executable'
+verified_digest=$(calculate_sha256 "$verified_binary") || die "SHA-256 calculation failed with $sha256_tool"
+case $verified_digest in
+	*[!0-9A-Fa-f]* | '') die 'verified binary digest is not a SHA-256 digest' ;;
+esac
+[ "${#verified_digest}" -eq 64 ] || die 'verified binary digest is not a SHA-256 digest'
 
 if $system; then
 	system_install_dir=${ASHDROP_SYSTEM_INSTALL_DIR:-/usr/local/bin}
@@ -253,11 +273,13 @@ if $system; then
 	command -v sudo >/dev/null 2>&1 || die 'required command not found: sudo'
 	sudo /bin/sh -c '
 		set -eu
+		set -f
 		umask 077
 		PATH=/usr/sbin:/usr/bin:/sbin:/bin
 		export PATH
 		source_file=$1
 		install_dir=$2
+		expected_digest=$3
 		[ -d "$install_dir" ] || {
 			printf "%s\n" "ashdrop installer: system install directory does not exist" >&2
 			exit 1
@@ -269,10 +291,20 @@ if $system; then
 		pending=$(mktemp "$install_dir/.ashdrop.XXXXXX")
 		trap '\''rm -f "$pending"'\'' 0 1 2 3 15
 		cp "$source_file" "$pending"
+		digest_output=$(sha256sum "$pending") || {
+			printf "%s\n" "ashdrop installer: could not verify privileged copy" >&2
+			exit 1
+		}
+		set -- $digest_output
+		copied_digest=$1
+		[ "$copied_digest" = "$expected_digest" ] || {
+			printf "%s\n" "ashdrop installer: verified binary changed before system installation" >&2
+			exit 1
+		}
 		chmod 0755 "$pending"
 		mv -f "$pending" "$install_dir/ashdrop"
 		pending=
-	' sh "$verified_binary" "$system_install_dir" || die 'system installation failed'
+	' sh "$verified_binary" "$system_install_dir" "$verified_digest" || die 'system installation failed'
 	install_dir=$system_install_dir
 else
 	if ! $install_dir_set; then
