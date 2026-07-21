@@ -158,29 +158,176 @@ curl_download() {
 	fi
 }
 
-curl_effective_url() {
-	_effective_url=$1
-	if $test_http; then
-		curl --fail --location --silent --show-error \
-			--proto '=http' --proto-redir '=http' \
-			--output /dev/null --write-out '%{url_effective}' "$_effective_url"
-	else
-		curl --fail --location --silent --show-error \
-			--proto '=https' --proto-redir '=https' --tlsv1.2 \
-			--output /dev/null --write-out '%{url_effective}' "$_effective_url"
-	fi
-}
-
 if ! $version_set; then
-	latest_url=$releases_base/latest
-	final_url=$(curl_effective_url "$latest_url") || die 'failed to resolve latest release'
-	tag_prefix=$releases_base/tag/cli-v
-	case $final_url in
-		"$tag_prefix"*) version=${final_url#"$tag_prefix"} ;;
-		*) die 'latest release did not resolve to a cli-vX.Y.Z tag' ;;
-	esac
-	valid_version "$version" || die 'latest release did not resolve to a cli-vX.Y.Z tag'
-	[ "$final_url" = "$tag_prefix$version" ] || die 'latest release URL contains unexpected data'
+	api_test_http=false
+	if [ "${ASHDROP_RELEASES_API_URL+x}" = x ]; then
+		releases_api_url=${ASHDROP_RELEASES_API_URL%/}
+		case $releases_api_url in
+			http://*)
+				api_authority=${releases_api_url#http://}
+				api_authority=${api_authority%%/*}
+				case $api_authority in
+					127.0.0.1 | localhost | '[::1]') ;;
+					127.0.0.1:* | localhost:*)
+						api_port=${api_authority#*:}
+						case $api_port in '' | *[!0-9]*) die 'HTTP releases API override must use a loopback host' ;; esac
+						;;
+					'[::1]:'*)
+						api_port=${api_authority#'[::1]:'}
+						case $api_port in '' | *[!0-9]*) die 'HTTP releases API override must use a loopback host' ;; esac
+						;;
+					*) die 'HTTP releases API override must use a loopback host' ;;
+				esac
+				api_test_http=true
+				;;
+			*) die 'releases API override must use a loopback host' ;;
+		esac
+	else
+		releases_api_url='https://api.github.com/repos/abdullah4tech/ashdrop/releases?per_page=100'
+	fi
+
+	api_response=$tmp_dir/releases.json
+	if $api_test_http; then
+		curl --fail --silent --show-error --max-filesize 8388608 \
+			--proto '=http' --proto-redir '=http' \
+			--output "$api_response" "$releases_api_url" || die 'failed to query releases API'
+	else
+		curl --fail --silent --show-error --max-filesize 8388608 \
+			--proto '=https' --proto-redir '=https' --tlsv1.2 \
+			--header 'Accept: application/vnd.github+json' \
+			--header 'X-GitHub-Api-Version: 2022-11-28' \
+			--output "$api_response" "$releases_api_url" || die 'failed to query releases API'
+	fi
+	api_size=$(wc -c <"$api_response")
+	[ "$api_size" -le 8388608 ] || die 'releases API response exceeds size limit'
+	command -v awk >/dev/null 2>&1 || die 'required command not found: awk'
+
+	if version=$(awk '
+		function bad() { exit 2 }
+		function ws(    c) {
+			while (p <= n) {
+				c = substr(json, p, 1)
+				if (c !~ /[ \t\r\n]/) break
+				p++
+			}
+		}
+		function string(    c, e, h, s) {
+			if (substr(json, p, 1) != "\"") bad()
+			p++; s = ""
+			while (p <= n) {
+				c = substr(json, p++, 1)
+				if (c == "\"") { value = s; return }
+				if (c == "\\") {
+					if (p > n) bad()
+					e = substr(json, p++, 1)
+					if (e == "\"" || e == "\\" || e == "/") s = s e
+					else if (e ~ /^[bfnrt]$/) s = s "?"
+					else if (e == "u") {
+						h = substr(json, p, 4)
+						if (length(h) != 4 || h !~ /^[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/) bad()
+						p += 4; s = s "?"
+					} else bad()
+				} else {
+					if (c ~ /[[:cntrl:]]/) bad()
+					s = s c
+				}
+			}
+			bad()
+		}
+		function number(    c) {
+			if (substr(json, p, 1) == "-") p++
+			c = substr(json, p, 1)
+			if (c == "0") { p++; if (substr(json, p, 1) ~ /[0-9]/) bad() }
+			else if (c ~ /[1-9]/) { while (substr(json, p, 1) ~ /[0-9]/) p++ }
+			else bad()
+			if (substr(json, p, 1) == ".") {
+				p++; if (substr(json, p, 1) !~ /[0-9]/) bad()
+				while (substr(json, p, 1) ~ /[0-9]/) p++
+			}
+			c = substr(json, p, 1)
+			if (c == "e" || c == "E") {
+				p++; c = substr(json, p, 1); if (c == "+" || c == "-") p++
+				if (substr(json, p, 1) !~ /[0-9]/) bad()
+				while (substr(json, p, 1) ~ /[0-9]/) p++
+			}
+			type = "number"
+		}
+		function array(    c) {
+			p++; ws(); if (substr(json, p, 1) == "]") { p++; return }
+			while (1) {
+				item(); ws(); c = substr(json, p++, 1)
+				if (c == "]") return
+				if (c != ",") bad()
+				ws()
+			}
+		}
+		function object(    c) {
+			p++; ws(); if (substr(json, p, 1) == "}") { p++; return }
+			while (1) {
+				string(); ws(); if (substr(json, p++, 1) != ":") bad()
+				ws(); item(); ws(); c = substr(json, p++, 1)
+				if (c == "}") return
+				if (c != ",") bad()
+				ws()
+			}
+		}
+		function item(    c) {
+			ws(); c = substr(json, p, 1)
+			if (c == "\"") { string(); type = "string" }
+			else if (c == "{") { object(); type = "object" }
+			else if (c == "[") { array(); type = "array" }
+			else if (substr(json, p, 4) == "true") { p += 4; type = "bool"; value = "true" }
+			else if (substr(json, p, 5) == "false") { p += 5; type = "bool"; value = "false" }
+			else if (substr(json, p, 4) == "null") { p += 4; type = "null"; value = "null" }
+			else if (c == "-" || c ~ /[0-9]/) number()
+			else bad()
+		}
+		function release(    c, key, tag, draft, pre, tag_n, draft_n, pre_n) {
+			if (substr(json, p++, 1) != "{") bad()
+			ws(); if (substr(json, p, 1) == "}") bad()
+			while (1) {
+				string(); key = value; ws(); if (substr(json, p++, 1) != ":") bad()
+				ws(); item()
+				if (key == "tag_name") { if (++tag_n != 1 || type != "string") bad(); tag = value }
+				else if (key == "draft") { if (++draft_n != 1 || type != "bool") bad(); draft = value }
+				else if (key == "prerelease") { if (++pre_n != 1 || type != "bool") bad(); pre = value }
+				ws(); c = substr(json, p++, 1)
+				if (c == "}") break
+				if (c != ",") bad()
+				ws()
+			}
+			if (tag_n != 1 || draft_n != 1 || pre_n != 1) bad()
+			if (!found && draft == "false" && pre == "false" &&
+				tag ~ /^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/) {
+				selected = substr(tag, 6); found = 1
+			}
+		}
+		function root(    c) {
+			ws(); if (substr(json, p++, 1) != "[") bad()
+			ws(); if (substr(json, p, 1) == "]") { p++; return }
+			while (1) {
+				release(); ws(); c = substr(json, p++, 1)
+				if (c == "]") break
+				if (c != ",") bad()
+				ws()
+			}
+			ws(); if (p <= n) bad()
+		}
+		{ json = json $0 "\n" }
+		END {
+			n = length(json); p = 1; root()
+			if (!found) exit 3
+			print selected
+		}
+	' "$api_response"); then
+		valid_version "$version" || die 'malformed releases API response'
+	else
+		api_parse_status=$?
+		case $api_parse_status in
+			3) die 'no stable CLI release found in releases API response' ;;
+			*) die 'malformed releases API response' ;;
+		esac
+	fi
 fi
 
 archive_name=ashdrop-v$version-linux-$arch.tar.gz

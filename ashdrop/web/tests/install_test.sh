@@ -67,7 +67,7 @@ EOF
 	XDG_BIN_HOME=
 	TEST_UNAME_S=Linux
 	TEST_UNAME_M=x86_64
-	unset ASHDROP_EXECUTION_MARKER ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR
+	unset ASHDROP_EXECUTION_MARKER ASHDROP_RELEASES_API_URL ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR
 	export PATH HOME TMPDIR XDG_BIN_HOME TEST_UNAME_S TEST_UNAME_M CASE_DIR
 }
 
@@ -196,6 +196,7 @@ for version, members in fixtures.items():
 PY
 	cat >"$TEST_ROOT/server.py" <<'PY'
 import http.server
+import json
 import pathlib
 import sys
 import urllib.parse
@@ -209,6 +210,48 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         with request_log.open("a") as output:
             output.write(path + "\n")
+        api_responses = {
+            "/api/releases": [
+                {"tag_name": "web-v9.0.0", "draft": False, "prerelease": False},
+                {"tag_name": "cli-v1.3.0", "draft": False, "prerelease": True},
+                {"tag_name": "cli-v1.2.4", "draft": True, "prerelease": False},
+                {"tag_name": "cli-v1.2.3", "draft": False, "prerelease": False},
+            ],
+            "/api/non-cli": [
+                {"tag_name": "web-v9.0.0", "draft": False, "prerelease": False},
+                {"tag_name": "cli-v1.2.3", "draft": False, "prerelease": False},
+            ],
+            "/api/prerelease": [
+                {"tag_name": "cli-v1.3.0", "draft": False, "prerelease": True},
+                {"tag_name": "cli-v1.2.3", "draft": False, "prerelease": False},
+            ],
+            "/api/no-cli": [
+                {"tag_name": "web-v9.0.0", "draft": False, "prerelease": False},
+                {"tag_name": "cli-v1.3.0", "draft": False, "prerelease": True},
+            ],
+        }
+        if path in api_responses:
+            body = json.dumps(api_responses[path]).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/malformed":
+            body = b'[{"tag_name":"cli-v1.2.3","draft":false,"prerelease":false}'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/api/ambiguous":
+            body = b'[{"tag_name":"cli-v1.2.3","tag_name":"cli-v1.1.0","draft":false,"prerelease":false}]'
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path == "/releases/latest":
             self.send_response(302)
             self.send_header("Location", "/releases/tag/cli-v1.2.3")
@@ -251,6 +294,7 @@ PY
 	done
 	PORT=$(cat "$PORT_FILE")
 	RELEASES_BASE=http://127.0.0.1:$PORT/releases
+	RELEASES_API=http://127.0.0.1:$PORT/api/releases
 	TEST_DIGEST=$(awk '{ print $1; exit }' "$FIXTURES/cli-v1.2.3/SHA256SUMS")
 	export TEST_DIGEST
 }
@@ -382,6 +426,16 @@ if expect_failure && expect_stderr 'failed to download' && [ "$(cat "$CASE_DIR/t
 	pass
 fi
 
+begin_test 'production default uses bounded HTTPS releases API query'
+run_installer --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'failed to query releases API' &&
+	grep -F 'https://api.github.com/repos/abdullah4tech/ashdrop/releases?per_page=100' "$CASE_DIR/curl.log" >/dev/null &&
+	grep -F -- '--proto =https' "$CASE_DIR/curl.log" >/dev/null &&
+	grep -F -- '--proto-redir =https' "$CASE_DIR/curl.log" >/dev/null &&
+	grep -F -- '--tlsv1.2' "$CASE_DIR/curl.log" >/dev/null; then
+	pass
+fi
+
 begin_test 'rejects an empty install directory before network access'
 run_installer --version 1.2.3 --install-dir ''
 if expect_failure && expect_stderr 'requires a value' && [ ! -e "$CASE_DIR/curl.log" ]; then
@@ -420,28 +474,96 @@ done
 
 start_server
 
-begin_test 'resolves latest exactly once and uses immutable assets'
+begin_test 'queries releases API exactly once and uses immutable assets'
 rm "$CASE_DIR/bin/curl"
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
-export ASHDROP_RELEASES_BASE_URL
+ASHDROP_RELEASES_API_URL=$RELEASES_API
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
 : >"$REQUEST_LOG"
 run_installer --install-dir "$CASE_DIR/install"
-latest_count=$(grep -c '^/releases/latest$' "$REQUEST_LOG" || true)
-if expect_status 0 && [ "$latest_count" -eq 1 ] &&
+api_count=$(grep -c '^/api/releases$' "$REQUEST_LOG" || true)
+if expect_status 0 && [ "$api_count" -eq 1 ] && ! grep -F '/releases/latest' "$REQUEST_LOG" >/dev/null &&
 	grep -F '/releases/download/cli-v1.2.3/ashdrop-v1.2.3-linux-x86_64.tar.gz' "$REQUEST_LOG" >/dev/null &&
 	grep -F '/releases/download/cli-v1.2.3/SHA256SUMS' "$REQUEST_LOG" >/dev/null; then
 	pass
 else
-	ensure_failure "$TEST_NAME: expected one latest request and immutable asset requests"
+	ensure_failure "$TEST_NAME: expected one API request and immutable asset requests"
 fi
 
-begin_test 'pinned version bypasses latest'
+begin_test 'ignores a newer non-CLI release'
 rm "$CASE_DIR/bin/curl"
 ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
-export ASHDROP_RELEASES_BASE_URL
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/non-cli
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+: >"$REQUEST_LOG"
+run_installer --install-dir "$CASE_DIR/install"
+if expect_status 0 && grep -F '/api/non-cli' "$REQUEST_LOG" >/dev/null &&
+	! grep -F '/releases/latest' "$REQUEST_LOG" >/dev/null &&
+	grep -F '/releases/download/cli-v1.2.3/ashdrop-v1.2.3-linux-x86_64.tar.gz' "$REQUEST_LOG" >/dev/null; then
+	pass
+fi
+
+begin_test 'ignores a CLI prerelease'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/prerelease
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+: >"$REQUEST_LOG"
+run_installer --install-dir "$CASE_DIR/install"
+if expect_status 0 && grep -F '/api/prerelease' "$REQUEST_LOG" >/dev/null &&
+	! grep -F '/releases/latest' "$REQUEST_LOG" >/dev/null &&
+	grep -F '/releases/download/cli-v1.2.3/ashdrop-v1.2.3-linux-x86_64.tar.gz' "$REQUEST_LOG" >/dev/null; then
+	pass
+fi
+
+begin_test 'fails when releases API has no stable CLI release'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/no-cli
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+run_installer --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'no stable CLI release'; then
+	pass
+fi
+
+begin_test 'fails closed on malformed releases API response'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/malformed
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+run_installer --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'malformed releases API response'; then
+	pass
+fi
+
+begin_test 'fails closed on ambiguous releases API response'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=http://127.0.0.1:$PORT/api/ambiguous
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
+run_installer --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'malformed releases API response'; then
+	pass
+fi
+
+begin_test 'rejects non-loopback HTTP releases API override'
+ASHDROP_RELEASES_API_URL=http://example.com/releases
+export ASHDROP_RELEASES_API_URL
+run_installer --install-dir "$CASE_DIR/install"
+if expect_failure && expect_stderr 'API override must use a loopback host' &&
+	[ ! -e "$CASE_DIR/curl.log" ]; then
+	pass
+fi
+
+begin_test 'pinned version bypasses API and latest lookup'
+rm "$CASE_DIR/bin/curl"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_RELEASES_API_URL=$RELEASES_API
+export ASHDROP_RELEASES_BASE_URL ASHDROP_RELEASES_API_URL
 : >"$REQUEST_LOG"
 run_installer --version 1.1.0 --install-dir "$CASE_DIR/install"
-if expect_status 0 && ! grep -F '/releases/latest' "$REQUEST_LOG" >/dev/null &&
+if expect_status 0 && ! grep -F '/api/' "$REQUEST_LOG" >/dev/null &&
+	! grep -F '/releases/latest' "$REQUEST_LOG" >/dev/null &&
 	grep -F '/releases/download/cli-v1.1.0/ashdrop-v1.1.0-linux-x86_64.tar.gz' "$REQUEST_LOG" >/dev/null &&
 	grep -F '/releases/download/cli-v1.1.0/SHA256SUMS' "$REQUEST_LOG" >/dev/null; then
 	pass
