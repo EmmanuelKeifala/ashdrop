@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: cli-release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -31,8 +35,7 @@ jobs:
         id: version
         run: |
           set -euo pipefail
-          version=$(ashdrop/cli/scripts/release-version.sh "$GITHUB_REF_NAME" \
-            ashdrop/cli/build.zig.zon ashdrop/web/static/cli-version)
+          version=$(ashdrop/cli/scripts/release-version.sh "$GITHUB_REF_NAME")
           printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
           printf 'VERSION=%s\n' "$version" >>"$GITHUB_ENV"
 
@@ -111,7 +114,12 @@ jobs:
           sha256sum "$arm_archive" "$x86_archive" >SHA256SUMS
           sha256sum --check SHA256SUMS
 
-      - name: Verify release tag still identifies the event commit
+      - name: Attest release archives
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Final release tag guard
         run: |
           set -euo pipefail
           tag_ref="refs/tags/$GITHUB_REF_NAME"
@@ -124,27 +132,12 @@ jobs:
               "$GITHUB_REF_NAME" "$GITHUB_SHA" "$current_commit" >&2
             exit 1
           fi
-
-      - name: Attest release archives
-        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
-        with:
-          subject-path: dist/*.tar.gz
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag_ref="refs/tags/$GITHUB_REF_NAME"
-          check_ref='refs/ashdrop-release-check/current'
-          git update-ref -d "$check_ref"
-          git fetch --no-tags --force origin "$tag_ref:$check_ref"
-          current_commit=$(git rev-parse --verify "$check_ref^{commit}")
-          if [[ "$current_commit" != "$GITHUB_SHA" ]]; then
-            printf 'release tag %s moved: expected %s, found %s\n' \
-              "$GITHUB_REF_NAME" "$GITHUB_SHA" "$current_commit" >&2
-            exit 1
-          fi
           x86_archive="ashdrop-v$VERSION-linux-x86_64.tar.gz"
           arm_archive="ashdrop-v$VERSION-linux-aarch64.tar.gz"
           gh release create "$GITHUB_REF_NAME" \
@@ -155,3 +148,58 @@ jobs:
             --verify-tag \
             --title "Ashdrop CLI v$VERSION" \
             --notes "Linux x86_64 and ARM64 binaries for Ashdrop CLI v$VERSION. Verify downloads with SHA256SUMS and GitHub artifact attestations."
+
+      - name: Promote CLI channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          channel_ref='refs/heads/cli-channel'
+          channel_tracking_ref='refs/remotes/origin/cli-channel'
+
+          set +e
+          git ls-remote --exit-code --heads origin "$channel_ref" >/dev/null
+          channel_status=$?
+          set -e
+          case "$channel_status" in
+            0)
+              git fetch --no-tags origin "$channel_ref:$channel_tracking_ref"
+              channel_base=$channel_tracking_ref
+              ;;
+            2) channel_base=$GITHUB_SHA ;;
+            *)
+              printf 'could not inspect CLI channel (git status %s)\n' "$channel_status" >&2
+              exit 1
+              ;;
+          esac
+
+          channel_parent=$(mktemp -d)
+          channel_dir=$channel_parent/worktree
+          cleanup_channel() {
+            git worktree remove --force "$channel_dir" 2>/dev/null || true
+            rm -rf "$channel_parent"
+          }
+          trap cleanup_channel EXIT
+
+          git worktree add --detach "$channel_dir" "$channel_base"
+          rm -f "$channel_dir/cli-version"
+          printf '%s\n' "$VERSION" >"$channel_dir/cli-version"
+          git -C "$channel_dir" add cli-version
+          git -C "$channel_dir" \
+            -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "chore: promote CLI channel to v$VERSION"
+          channel_commit=$(git -C "$channel_dir" rev-parse HEAD)
+
+          askpass=$channel_parent/askpass.sh
+          cat >"$askpass" <<'EOF'
+          #!/bin/sh
+          case $1 in
+            *Username*) printf '%s\n' x-access-token ;;
+            *Password*) printf '%s\n' "$GH_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          chmod 0700 "$askpass"
+          GIT_ASKPASS=$askpass GIT_TERMINAL_PROMPT=0 \
+            git push origin "$channel_commit:refs/heads/cli-channel"

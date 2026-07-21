@@ -10,18 +10,12 @@ case $# in
     1)
         script_dir=$(CDPATH= cd "$(dirname "$0")" && pwd)
         zon_path=$script_dir/../build.zig.zon
-        pointer_path=$script_dir/../../web/static/cli-version
         ;;
     2)
         zon_path=$2
-        pointer_path=
-        ;;
-    3)
-        zon_path=$2
-        pointer_path=$3
         ;;
     *)
-        fail "usage: $0 cli-vMAJOR.MINOR.PATCH [build.zig.zon [cli-version]]"
+        fail "usage: $0 cli-vMAJOR.MINOR.PATCH [build.zig.zon]"
         ;;
 esac
 
@@ -73,16 +67,5 @@ package_version=$(awk '
 ' <"$zon_path")
 
 [ "$version" = "$package_version" ] || fail "release tag version $version does not match package version $package_version"
-
-if [ -n "$pointer_path" ]; then
-    [ -f "$pointer_path" ] && [ -r "$pointer_path" ] || fail "cannot read CLI version pointer: $pointer_path"
-    pointer_size=$(wc -c <"$pointer_path")
-    if ! IFS= read -r pointer_version <"$pointer_path"; then
-        fail "malformed CLI version pointer: $pointer_path"
-    fi
-    expected_pointer_size=$((${#pointer_version} + 1))
-    [ "$pointer_size" -eq "$expected_pointer_size" ] || fail "malformed CLI version pointer: $pointer_path"
-    [ "$version" = "$pointer_version" ] || fail "release tag version $version does not match CLI version pointer $pointer_version"
-fi
 
 printf '%s\n' "$version"

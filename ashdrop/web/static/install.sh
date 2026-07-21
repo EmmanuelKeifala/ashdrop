@@ -183,7 +183,7 @@ if ! $version_set; then
 			*) die 'pointer override must use a loopback host' ;;
 		esac
 	else
-		cli_version_url=https://ashdrop.vercel.app/cli-version
+		cli_version_url=https://raw.githubusercontent.com/abdullah4tech/ashdrop/cli-channel/cli-version
 	fi
 
 	pointer_response=$tmp_dir/cli-version

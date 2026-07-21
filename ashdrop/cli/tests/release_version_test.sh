@@ -41,16 +41,12 @@ expect_failure() {
 
 printf '.{\n    .version = "1.2.3",\n}\n' >"$tmp_dir/version.zon"
 printf '.{\n    .version = "1.2.3",\n}\n' >"$tmp_dir/manifest=version.zon"
-printf '1.2.3\n' >"$tmp_dir/cli-version"
-printf '1.2.4\n' >"$tmp_dir/stale-cli-version"
 printf '.{\n    .name = .ashdrop,\n}\n' >"$tmp_dir/missing.zon"
 printf '.{\n    .version = "1.2.3",\n    .version = "1.2.3",\n}\n' >"$tmp_dir/duplicate.zon"
 
 expect_success 'actual package version' '0.1.0' 'cli-v0.1.0'
 cd "$tmp_dir"
 expect_success 'manifest path containing equals' '1.2.3' 'cli-v1.2.3' 'manifest=version.zon'
-expect_success 'matching CLI version pointer' '1.2.3' 'cli-v1.2.3' 'version.zon' 'cli-version'
-expect_failure 'stale CLI version pointer' 'cli-v1.2.3' 'version.zon' 'stale-cli-version'
 expect_failure 'malformed prefix' 'v0.1.0' "$tmp_dir/version.zon"
 expect_failure 'version mismatch' 'cli-v1.2.4' "$tmp_dir/version.zon"
 expect_failure 'leading zero' 'cli-v01.2.3' "$tmp_dir/version.zon"

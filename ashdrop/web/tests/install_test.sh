@@ -403,7 +403,8 @@ fi
 begin_test 'production default uses bounded HTTPS CLI version pointer'
 run_installer --install-dir "$CASE_DIR/install"
 if expect_failure && expect_stderr 'failed to fetch CLI version pointer' &&
-	grep -F 'https://ashdrop.vercel.app/cli-version' "$CASE_DIR/curl.log" >/dev/null &&
+	grep -F 'https://raw.githubusercontent.com/abdullah4tech/ashdrop/cli-channel/cli-version' "$CASE_DIR/curl.log" >/dev/null &&
+	! grep -F 'api.github.com' "$CASE_DIR/curl.log" >/dev/null &&
 	grep -F -- '--max-filesize 32' "$CASE_DIR/curl.log" >/dev/null &&
 	grep -F -- '--proto =https' "$CASE_DIR/curl.log" >/dev/null &&
 	grep -F -- '--proto-redir =https' "$CASE_DIR/curl.log" >/dev/null &&
