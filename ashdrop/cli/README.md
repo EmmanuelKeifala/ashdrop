@@ -79,8 +79,8 @@ awk -v archive="$ARCHIVE" '$2 == archive { print }' SHA256SUMS | sha256sum --che
 ```
 
 The release workflow also creates GitHub OIDC-backed build-provenance
-attestations for each archive. With the GitHub CLI installed, verify the
-downloaded archive independently of the checksum manifest:
+attestations for each archive. With GitHub CLI 2.49.0 or later installed,
+verify the downloaded archive independently of the checksum manifest:
 
 ```sh
 gh attestation verify ashdrop-v0.1.0-linux-x86_64.tar.gz \
