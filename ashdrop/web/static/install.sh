@@ -275,7 +275,7 @@ if $system; then
 		set -eu
 		set -f
 		umask 077
-		PATH=/usr/sbin:/usr/bin:/sbin:/bin
+		PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/run/current-system/sw/bin
 		export PATH
 		source_file=$1
 		install_dir=$2
@@ -291,12 +291,28 @@ if $system; then
 		pending=$(mktemp "$install_dir/.ashdrop.XXXXXX")
 		trap '\''rm -f "$pending"'\'' 0 1 2 3 15
 		cp "$source_file" "$pending"
-		digest_output=$(sha256sum "$pending") || {
+		digest_failed() {
 			printf "%s\n" "ashdrop installer: could not verify privileged copy" >&2
 			exit 1
 		}
-		set -- $digest_output
-		copied_digest=$1
+		if command -v sha256sum >/dev/null 2>&1; then
+			digest_output=$(sha256sum "$pending") || digest_failed
+			set -- $digest_output
+			[ "$#" -ge 1 ] || digest_failed
+			copied_digest=$1
+		elif command -v shasum >/dev/null 2>&1; then
+			digest_output=$(shasum -a 256 "$pending") || digest_failed
+			set -- $digest_output
+			[ "$#" -ge 1 ] || digest_failed
+			copied_digest=$1
+		elif command -v openssl >/dev/null 2>&1; then
+			digest_output=$(openssl dgst -sha256 "$pending") || digest_failed
+			set -- $digest_output
+			[ "$#" -ge 1 ] || digest_failed
+			for copied_digest do :; done
+		else
+			digest_failed
+		fi
 		[ "$copied_digest" = "$expected_digest" ] || {
 			printf "%s\n" "ashdrop installer: verified binary changed before system installation" >&2
 			exit 1

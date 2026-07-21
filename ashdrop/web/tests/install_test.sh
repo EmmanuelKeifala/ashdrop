@@ -5,10 +5,14 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 INSTALLER=$ROOT/static/install.sh
 ORIGINAL_PATH=$PATH
 POSIX_SH=$(command -v sh)
+PYTHON3=$(command -v python3)
 REAL_CHMOD=$(command -v chmod)
+REAL_CP=$(command -v cp)
+REAL_MKTEMP=$(command -v mktemp)
 REAL_MV=$(command -v mv)
+REAL_RM=$(command -v rm)
 REAL_STAT=$(command -v stat)
-export POSIX_SH REAL_CHMOD REAL_MV REAL_STAT
+export POSIX_SH PYTHON3 REAL_CHMOD REAL_CP REAL_MKTEMP REAL_MV REAL_RM REAL_STAT
 TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ashdrop-installer-tests.XXXXXX")
 SERVER_PID=
 
@@ -810,6 +814,56 @@ run_installer --version 1.2.3 --system
 set -- "$ASHDROP_SYSTEM_INSTALL_DIR"/.ashdrop.*
 if expect_failure && expect_stderr 'verified binary changed before system installation' &&
 	[ "$(cat "$ASHDROP_SYSTEM_INSTALL_DIR/ashdrop")" = sentinel ] && [ ! -e "$1" ]; then
+	pass
+fi
+
+begin_test 'system privileged rehash falls back to shasum'
+rm "$CASE_DIR/bin/curl"
+ROOT_TOOLS=$CASE_DIR/root-tools
+mkdir "$ROOT_TOOLS"
+ln -s "$REAL_CHMOD" "$ROOT_TOOLS/chmod"
+ln -s "$REAL_CP" "$ROOT_TOOLS/cp"
+ln -s "$REAL_MKTEMP" "$ROOT_TOOLS/mktemp"
+ln -s "$REAL_MV" "$ROOT_TOOLS/mv"
+ln -s "$REAL_RM" "$ROOT_TOOLS/rm"
+cat >"$ROOT_TOOLS/shasum" <<'EOF'
+#!/bin/sh
+[ "$1" = -a ] && [ "$2" = 256 ] || exit 97
+file=$3
+digest=$("$PYTHON3" - "$file" <<'PY'
+import hashlib
+import pathlib
+import sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+) || exit 98
+printf 'shasum\n' >>"$CASE_DIR/root-digest.log"
+printf '%s  %s\n' "$digest" "$file"
+EOF
+cat >"$CASE_DIR/bin/sudo" <<'EOF'
+#!/bin/sh
+modified_script=$("$PYTHON3" - "$3" "$ROOT_TOOLS" <<'PY'
+import shlex
+import sys
+script, root = sys.argv[1:]
+for line in script.splitlines():
+    if line.strip().startswith("PATH="):
+        print("\t\tPATH=" + shlex.quote(root))
+    else:
+        print(line)
+PY
+) || exit 96
+shift 3
+exec "$POSIX_SH" -c "$modified_script" "$@"
+EOF
+"$REAL_CHMOD" +x "$ROOT_TOOLS/shasum" "$CASE_DIR/bin/sudo"
+ASHDROP_RELEASES_BASE_URL=$RELEASES_BASE
+ASHDROP_SYSTEM_INSTALL_DIR=$CASE_DIR/system-bin
+export ASHDROP_RELEASES_BASE_URL ASHDROP_SYSTEM_INSTALL_DIR ROOT_TOOLS
+mkdir "$ASHDROP_SYSTEM_INSTALL_DIR"
+run_installer --version 1.2.3 --system
+if expect_status 0 && [ "$(cat "$CASE_DIR/root-digest.log")" = shasum ] &&
+	[ -x "$ASHDROP_SYSTEM_INSTALL_DIR/ashdrop" ]; then
 	pass
 fi
 
