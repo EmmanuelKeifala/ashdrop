@@ -56,6 +56,11 @@ case $status in
             --notes "Linux x86_64 and ARM64 binaries for Ashdrop CLI v$VERSION. Verify downloads with SHA256SUMS and GitHub artifact attestations."
         ;;
     200)
+        release_state=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease --jq '"\(.isDraft) \(.isPrerelease)"') ||
+            fail 'could not inspect existing release state'
+        [ "$release_state" = 'false false' ] || fail 'existing release is not a published stable release'
+
         expected_names=$tmp_dir/expected-assets
         unsorted_names=$tmp_dir/unsorted-assets
         actual_names=$tmp_dir/actual-assets

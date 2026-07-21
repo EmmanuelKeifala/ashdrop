@@ -27,6 +27,13 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - name: Test release workflow safety
+        working-directory: ashdrop/cli
+        run: |
+          set -euo pipefail
+          sh tests/release_version_test.sh
+          sh tests/release_workflow_test.sh
+
       - name: Validate release version
         id: version
         run: |

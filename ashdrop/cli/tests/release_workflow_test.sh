@@ -27,8 +27,17 @@ if grep -F 'concurrency:' "$workflow" >/dev/null; then
     fail 'release workflow must not cancel or replace pending tag runs'
 fi
 grep -F 'persist-credentials: false' "$workflow" >/dev/null || fail 'checkout credentials must not persist'
+version_test_line=$(line_of 'sh tests/release_version_test.sh')
+workflow_test_line=$(line_of 'sh tests/release_workflow_test.sh')
+setup_line=$(line_of 'name: Set up Zig')
+attest_line=$(line_of 'uses: actions/attest-build-provenance@')
 publish_line=$(line_of 'ashdrop/cli/scripts/publish-release.sh')
 promote_line=$(line_of 'ashdrop/cli/scripts/promote-channel.sh')
+[ "$version_test_line" -lt "$setup_line" ] || fail 'release version tests must run before release builds'
+[ "$workflow_test_line" -lt "$setup_line" ] || fail 'release workflow tests must run before release builds'
+[ "$workflow_test_line" -lt "$attest_line" ] || fail 'release workflow tests must run before attestation'
+[ "$workflow_test_line" -lt "$publish_line" ] || fail 'release workflow tests must run before publication'
+[ "$workflow_test_line" -lt "$promote_line" ] || fail 'release workflow tests must run before channel mutation'
 [ "$publish_line" -lt "$promote_line" ] || fail 'channel promotion must follow release publication'
 
 grep -F -- '--force' "$promoter" >/dev/null 2>&1 && fail 'channel promotion must never force push'
@@ -84,7 +93,10 @@ case $2 in
         ;;
     view)
         printf 'gh:view\n' >>"$CALL_LOG"
-        printf '%s\n' "$RELEASE_ASSET_NAMES"
+        case " $* " in
+            *isDraft*) printf '%s\n' "$RELEASE_STATE" ;;
+            *) printf '%s\n' "$RELEASE_ASSET_NAMES" ;;
+        esac
         [ "${FAIL_RELEASE_VIEW:-false}" != true ] || exit 96
         ;;
     download)
@@ -115,6 +127,7 @@ rev_count=$tmp_dir/rev-count
 run_publisher() {
     RELEASE_STATUS=$1
     RELEASE_ASSET_NAMES=${2-}
+    RELEASE_STATE=${3-'false false'}
     CALL_LOG=$call_log
     REV_COUNT=$rev_count
     RELEASE_ASSETS=$release_assets
@@ -124,7 +137,7 @@ run_publisher() {
     GITHUB_REPOSITORY=abdullah4tech/ashdrop
     GITHUB_API_URL=https://api.github.test
     GH_TOKEN=test-token
-    export RELEASE_STATUS RELEASE_ASSET_NAMES CALL_LOG REV_COUNT RELEASE_ASSETS VERSION
+    export RELEASE_STATUS RELEASE_ASSET_NAMES RELEASE_STATE CALL_LOG REV_COUNT RELEASE_ASSETS VERSION
     export GITHUB_REF_NAME GITHUB_SHA GITHUB_REPOSITORY GITHUB_API_URL GH_TOKEN
     PATH=$mock_bin:$PATH "$publisher" "$dist"
 }
@@ -145,6 +158,14 @@ run_publisher 200 "$expected_assets"
 ! grep -F 'gh:create' "$call_log" >/dev/null || fail 'matching release retry attempted to overwrite assets'
 [ "$(grep -c '^gh:download$' "$call_log")" -eq 3 ] || fail 'matching release retry did not compare every asset'
 [ "$(grep -c '^git:rev-parse$' "$call_log")" -eq 2 ] || fail 'existing release must have pre/post tag guards'
+
+for invalid_state in 'true false' 'false true' '' 'malformed'; do
+    : >"$call_log"
+    rm -f "$rev_count"
+    if run_publisher 200 "$expected_assets" "$invalid_state" >"$tmp_dir/stdout" 2>"$tmp_dir/stderr"; then
+        fail "invalid existing release state was accepted: ${invalid_state:-missing}"
+    fi
+done
 
 printf 'different archive\n' >"$release_assets/ashdrop-v1.2.3-linux-x86_64.tar.gz"
 : >"$call_log"
