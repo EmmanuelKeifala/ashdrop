@@ -47,9 +47,9 @@ done
 [ -f "$zon_path" ] && [ -r "$zon_path" ] || fail "cannot read package manifest: $zon_path"
 
 declaration_count=$(awk '
-    /^[[:space:]]*[.]version[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*([/][/].*)?$/ { count++ }
+    /^[[:space:]]*[.]version[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*(\/\/.*)?$/ { count++ }
     END { print count + 0 }
-' "$zon_path")
+' <"$zon_path")
 
 case $declaration_count in
     0) fail "package manifest has no .version declaration: $zon_path" ;;
@@ -58,13 +58,13 @@ case $declaration_count in
 esac
 
 package_version=$(awk '
-    /^[[:space:]]*[.]version[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*([/][/].*)?$/ {
+    /^[[:space:]]*[.]version[[:space:]]*=[[:space:]]*"[^"]*"[[:space:]]*,?[[:space:]]*(\/\/.*)?$/ {
         line = $0
         sub(/^[[:space:]]*[.]version[[:space:]]*=[[:space:]]*"/, "", line)
-        sub(/"[[:space:]]*,?[[:space:]]*([/][/].*)?$/, "", line)
+        sub(/"[[:space:]]*,?[[:space:]]*(\/\/.*)?$/, "", line)
         print line
     }
-' "$zon_path")
+' <"$zon_path")
 
 [ "$version" = "$package_version" ] || fail "release tag version $version does not match package version $package_version"
 
