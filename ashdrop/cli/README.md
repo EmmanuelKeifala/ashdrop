@@ -4,11 +4,94 @@
 identity, stores the encrypted drop through the Ashdrop API, and writes a
 received file locally. It does not print environment-file plaintext.
 
-## Build
+## Install a Binary
 
-Run these commands from `ashdrop/cli`. `build.zig.zon` declares stable Zig
-`0.16.0` as the minimum and verified version; it does not enforce an exact
-toolchain pin.
+Once a CLI release is published, install the latest stable version on Linux
+with:
+
+```sh
+curl -fsSL https://ashdrop.vercel.app/install.sh | sh
+```
+
+The release process supports Linux x86_64 and ARM64. The installer selects the
+matching archive and installs `ashdrop` into
+`${XDG_BIN_HOME:-$HOME/.local/bin}` by default. If that directory is not on
+`PATH`, the installer prints the directory to add.
+
+Pin an installation to a specific release:
+
+```sh
+curl -fsSL https://ashdrop.vercel.app/install.sh | sh -s -- --version 0.1.0
+```
+
+Without `--version`, the installer resolves the latest stable release. To roll
+back, rerun the pinned command with the earlier version. To choose another
+user-writable destination, use `--install-dir`:
+
+```sh
+curl -fsSL https://ashdrop.vercel.app/install.sh | sh -s -- \
+  --install-dir "$HOME/bin"
+```
+
+For a system installation into `/usr/local/bin`, use:
+
+```sh
+curl -fsSL https://ashdrop.vercel.app/install.sh | sh -s -- --system
+```
+
+System installation downloads and verifies the release without privileges.
+It invokes `sudo` only for the final copy into `/usr/local/bin`, and verifies
+that privileged copy before replacing the installed binary.
+
+Confirm the installed version with:
+
+```sh
+ashdrop --version
+```
+
+### Release Integrity and Provenance
+
+The installer downloads the selected versioned archive and `SHA256SUMS` from
+the same GitHub Release, then rejects an archive whose SHA-256 digest does not
+match its manifest entry. This detects corruption, incomplete downloads, and
+mismatched release assets. It is not an independent publisher signature: a
+compromise of the release origin could replace both the archive and checksum.
+
+Release artifacts use these versioned names:
+
+```text
+ashdrop-v0.1.0-linux-x86_64.tar.gz
+ashdrop-v0.1.0-linux-aarch64.tar.gz
+SHA256SUMS
+```
+
+Once the corresponding release is published, an archive and its checksum can
+also be downloaded and verified manually. Set `ARCH` to `x86_64` or `aarch64`:
+
+```sh
+VERSION=0.1.0
+ARCH=x86_64
+ARCHIVE="ashdrop-v$VERSION-linux-$ARCH.tar.gz"
+BASE="https://github.com/abdullah4tech/ashdrop/releases/download/cli-v$VERSION"
+curl -fLO "$BASE/$ARCHIVE"
+curl -fLO "$BASE/SHA256SUMS"
+awk -v archive="$ARCHIVE" '$2 == archive { print }' SHA256SUMS | sha256sum --check
+```
+
+The release workflow also creates GitHub OIDC-backed build-provenance
+attestations for each archive. With the GitHub CLI installed, verify the
+downloaded archive independently of the checksum manifest:
+
+```sh
+gh attestation verify <archive> --repo abdullah4tech/ashdrop
+```
+
+Replace `<archive>` with the downloaded versioned archive name.
+
+## Build from Source
+
+Source builds use Zig 0.16.0. Run these commands from `ashdrop/cli`;
+`build.zig.zon` declares Zig 0.16.0 as the minimum supported toolchain version.
 
 ```sh
 # Development build; installs ./zig-out/bin/ashdrop
