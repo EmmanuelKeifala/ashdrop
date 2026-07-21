@@ -83,10 +83,9 @@ attestations for each archive. With the GitHub CLI installed, verify the
 downloaded archive independently of the checksum manifest:
 
 ```sh
-gh attestation verify <archive> --repo abdullah4tech/ashdrop
+gh attestation verify ashdrop-v0.1.0-linux-x86_64.tar.gz \
+  --repo abdullah4tech/ashdrop
 ```
-
-Replace `<archive>` with the downloaded versioned archive name.
 
 ## Build from Source
 
